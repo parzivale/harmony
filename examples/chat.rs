@@ -39,7 +39,7 @@ async fn main() {
     let broker = builder.add_protocol::<Message>().build().await.unwrap();
     let send_broker = broker.clone();
     let recieve_broker = broker.clone();
-    if let Some(node_id) = args.into_iter().nth(1) {
+    let mut spawned = if let Some(node_id) = args.into_iter().nth(1) {
         tokio::spawn(async move {
             let stdin = stdin();
             let mut buffer = String::new();
@@ -54,16 +54,36 @@ async fn main() {
                 buffer.clear();
             }
         });
+        true
     } else {
         let _ = BrokerBuilder::new(key.clone()).await.unwrap();
         println!("Your current public key is: {:?}", key.public());
+        false
     };
 
+    let send_broker = broker.clone();
     tokio::spawn(async move {
         let mut stream = recieve_broker.recieve_packet_stream::<Message>().unwrap();
         while let Some(message) = stream.next().await {
             let message = message.unwrap();
+
+            let from = message.from_node();
             println!("{}", message.data());
+            let send_broker = send_broker.clone();
+            if !spawned {
+                tokio::spawn(async move {
+                    let stdin = stdin();
+                    let mut buffer = String::new();
+                    let mut send_stream =
+                        send_broker.send_packet_sink::<Message>(from).await.unwrap();
+                    loop {
+                        stdin.read_line(&mut buffer).unwrap();
+                        send_stream.send(Message::new(&buffer)).await.unwrap();
+                        buffer.clear();
+                    }
+                });
+                spawned = true;
+            }
         }
     })
     .await
