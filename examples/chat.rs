@@ -93,7 +93,7 @@ async fn main() {
                 spawned = true;
             }
         }
-    })
-    .await
-    .unwrap();
+    });
+
+    loop {}
 }
