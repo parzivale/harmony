@@ -36,6 +36,7 @@ async fn main() {
     let node_id = if let Some(id) = args.into_iter().nth(1) {
         id
     } else {
+        let _ = BrokerBuilder::new(key.clone()).await.unwrap();
         println!("Your current public key is: {:?}", key.public());
         return;
     };
