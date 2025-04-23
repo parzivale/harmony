@@ -7,7 +7,17 @@ edition = "2024"
 members = ["crates/*"]
 
 [dependencies]
+iroh = "0.34.1"
 postcard = "1.1.1"
+rand = "0.8"
 serde = "1.0.219"
+tokio = { version = "1.44.2", features = ["full"] }
 
+harmony_core = { path = "./crates/harmony_core"}
+protocol = { path = "./crates/protocol" }
+futures-util = "0.3.31"
+keyring = { version = "3.6.2", features = ["apple-native", "windows-native", "sync-secret-service"] }
+whoami = "1.5.0"
 
+[dev-dependencies]
+base64 = "0.22.1"
