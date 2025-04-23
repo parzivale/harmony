@@ -24,13 +24,7 @@ async fn main() {
             entry.set_secret(encoded).unwrap();
             return;
         }
-        Ok(secret) => SecretKey::from_bytes(
-            &general_purpose::STANDARD
-                .decode(&secret)
-                .unwrap()
-                .try_into()
-                .unwrap(),
-        ),
+        Ok(secret) => SecretKey::from_bytes(&secret.try_into().unwrap()),
         Err(err) => panic!("{:?}", err),
     };
     let node_id = if let Some(id) = args.into_iter().nth(1) {
