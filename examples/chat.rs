@@ -41,6 +41,7 @@ async fn main() {
     let recieve_broker = broker.clone();
     let mut spawned = if let Some(node_id) = args.into_iter().nth(1) {
         tokio::spawn(async move {
+            println!("Spawned input handler");
             let stdin = stdin();
             let mut buffer = String::new();
             let node_id = NodeId::from_str(&node_id).unwrap();
@@ -48,6 +49,7 @@ async fn main() {
                 .send_packet_sink::<Message>(node_id)
                 .await
                 .unwrap();
+            println!("Acquired send stream");
             loop {
                 stdin.read_line(&mut buffer).unwrap();
                 send_stream.send(Message::new(&buffer)).await.unwrap();
@@ -68,14 +70,17 @@ async fn main() {
             let message = message.unwrap();
 
             let from = message.from_node();
-            println!("{}", message.data());
+
+            print!("{}", message.data());
             let send_broker = send_broker.clone();
             if !spawned {
                 tokio::spawn(async move {
+                    println!("Spawned Input handler");
                     let stdin = stdin();
                     let mut buffer = String::new();
                     let mut send_stream =
                         send_broker.send_packet_sink::<Message>(from).await.unwrap();
+                    println!("Aquired Send Stream");
                     loop {
                         stdin.read_line(&mut buffer).unwrap();
                         send_stream.send(Message::new(&buffer)).await.unwrap();
