@@ -58,7 +58,6 @@ async fn main() {
         });
         true
     } else {
-        let _ = BrokerBuilder::new(key.clone()).await.unwrap();
         println!("Your current public key is: {:?}", key.public());
         false
     };
@@ -71,7 +70,7 @@ async fn main() {
 
             let from = message.from_node();
 
-            print!("{}", message.data());
+            println!("{}", message.data());
             let send_broker = send_broker.clone();
             if !spawned {
                 tokio::spawn(async move {
