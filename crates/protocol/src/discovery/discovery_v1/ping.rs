@@ -4,11 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::discovery;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Status {
-    Active,
-    Afk,
-}
+pub struct Ping;
 
-impl ProtocolPacket<'_> for Status {
-    const APLN: &'static str = discovery!("v1", "status");
+impl ProtocolPacket<'_> for Ping {
+    const APLN: &'static str = discovery!("v1", "ping");
 }

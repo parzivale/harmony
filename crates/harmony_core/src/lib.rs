@@ -1,397 +1,25 @@
 use anyhow::Result;
-use futures_util::{Sink, Stream, StreamExt, future::BoxFuture, ready};
+use futures_util::{Sink, Stream};
 use iroh::{
     Endpoint, NodeId, RelayMode, SecretKey,
-    endpoint::{
-        ClosedStream, Connection, ConnectionError, ReadError, RecvStream, SendStream, WriteError,
-    },
-    protocol::{ProtocolHandler, Router, RouterBuilder},
+    endpoint::{ConnectOptions, ConnectionError},
+    protocol::{Router, RouterBuilder},
 };
-use serde::{Deserialize, Serialize};
-use std::{
-    any::{Any, TypeId},
-    collections::BTreeMap,
-    io::{self},
-    marker::PhantomData,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+pub use packet::ProtocolPacket;
+use protocol_handler::IrohPacketHandler;
+use receive::{IncomingPackets, RecieveConnection};
+use send::SendConnection;
+
+use std::{any::TypeId, collections::BTreeMap, sync::Arc};
 use thiserror::Error;
-use tokio::{
-    io::AsyncReadExt,
-    sync::{
-        Mutex, MutexGuard,
-        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
-    },
-};
+use tokio::sync::{Mutex, mpsc::unbounded_channel};
 
-// unpin needed for future::stream impl
-// debug needed for iroh protocolHandler
-pub trait ProtocolPacket<'de>:
-    Serialize + Deserialize<'de> + Send + Sync + Unpin + std::fmt::Debug
-{
-    const APLN: &'static str;
-
-    fn take_from_bytes(buf: &'de [u8]) -> postcard::Result<(Self, &'de [u8])> {
-        postcard::take_from_bytes(buf)
-    }
-
-    fn into_bytes(self, buf: &mut Vec<u8>) -> postcard::Result<&mut Vec<u8>> {
-        postcard::to_io(&self, buf)
-    }
-}
-
-pub struct PacketDispatcher<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    send_stream: SendStream,
-    buffer: Vec<u8>,
-    written: usize,
-    flushing: bool,
-    _phantom: PhantomData<T>,
-}
-
-impl<T> From<SendStream> for PacketDispatcher<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    fn from(value: SendStream) -> Self {
-        Self {
-            send_stream: value,
-            buffer: Vec::new(),
-            written: 0,
-            flushing: false,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-#[derive(Error, Debug)]
-pub enum PacketDispatcherError {
-    #[error(transparent)]
-    PostcardError(#[from] postcard::Error),
-    #[error(transparent)]
-    WriteError(#[from] WriteError),
-    #[error(transparent)]
-    StreamClosed(#[from] ClosedStream),
-}
-
-impl<T> Sink<T> for PacketDispatcher<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    type Error = PacketDispatcherError;
-
-    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.flushing {
-            Poll::Pending
-        } else {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Self::Error> {
-        let this = self.get_mut();
-        item.into_bytes(&mut this.buffer)?;
-        Ok(())
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.get_mut();
-        let total_len = this.buffer.len();
-        this.flushing = true;
-        while this.written < total_len {
-            let n = ready!(SendStream::poll_write(
-                Pin::new(&mut this.send_stream),
-                cx,
-                &this.buffer[this.written..],
-            )?);
-            this.written += n;
-        }
-        this.flushing = false;
-        this.buffer.clear();
-        this.written = 0;
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let this = self.get_mut();
-        ready!(Sink::poll_flush(Pin::new(this), cx))?;
-        this.send_stream.finish()?;
-        Poll::Ready(Ok(()))
-    }
-}
-
-pub struct PacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    recv_stream: RecvStream,
-    buffer: Vec<u8>,
-    _phantom: PhantomData<T>,
-}
-
-impl<T> PacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    fn take_from_bytes(&mut self) -> Result<NextPacketStatus<T>, postcard::Error> {
-        match T::take_from_bytes(&self.buffer) {
-            Ok((packet, remaining)) => {
-                let used = self.buffer.len() - remaining.len();
-                self.buffer.drain(..used);
-                Ok(NextPacketStatus::Packet(packet))
-            }
-            Err(postcard::Error::DeserializeUnexpectedEnd) => {
-                Ok(NextPacketStatus::BytesRemaining(self.buffer.len()))
-            }
-            Err(err) => Err(err),
-        }
-    }
-}
-
-impl<T> Stream for PacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    type Item = Result<T, PacketHandlerError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if !this.buffer.is_empty() {
-            return match this.take_from_bytes() {
-                Ok(NextPacketStatus::Packet(packet)) => Poll::Ready(Some(Ok(packet))),
-                Ok(NextPacketStatus::BytesRemaining(_)) => Poll::Pending,
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
-            };
-        }
-        let read_fut = this.recv_stream.read_buf(&mut this.buffer);
-        tokio::pin!(read_fut);
-
-        match ready!(read_fut.as_mut().poll(cx)) {
-            Ok(0) => Poll::Ready(None),
-            Ok(_) => match this.take_from_bytes() {
-                Ok(NextPacketStatus::Packet(packet)) => Poll::Ready(Some(Ok(packet))),
-                Ok(NextPacketStatus::BytesRemaining(_)) => Poll::Pending,
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
-            },
-            Err(err) => match err.downcast::<ReadError>() {
-                Ok(err) => match err {
-                    ReadError::ConnectionLost(ConnectionError::ApplicationClosed(_)) => {
-                        Poll::Ready(None)
-                    }
-                    err => Poll::Ready(Some(Err(err.into()))),
-                },
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
-            },
-        }
-    }
-}
-
-impl<T> From<RecvStream> for PacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    fn from(value: RecvStream) -> Self {
-        Self {
-            recv_stream: value,
-            buffer: Vec::new(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-pub enum NextPacketStatus<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    Packet(T),
-    BytesRemaining(usize),
-}
-
-#[derive(Error, Debug)]
-pub enum PacketHandlerError {
-    #[error(transparent)]
-    PostcardError(#[from] postcard::Error),
-    #[error(transparent)]
-    ReadError(#[from] ReadError),
-    #[error(transparent)]
-    IoError(#[from] io::Error),
-}
-
-pub struct Packet<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    data: T,
-    from: NodeId,
-}
-
-impl<T> Packet<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    pub fn from_node(&self) -> NodeId {
-        self.from
-    }
-
-    pub fn data(self) -> T {
-        self.data
-    }
-}
-
-impl<T> From<(T, NodeId)> for Packet<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    fn from(value: (T, NodeId)) -> Self {
-        Self {
-            data: value.0,
-            from: value.1,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct IrohPacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    sender: UnboundedSender<(NodeId, Box<dyn Any + Send + Sync>)>,
-    _phantom: PhantomData<T>,
-}
-
-impl<T> IrohPacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    pub fn new(sender: UnboundedSender<(NodeId, Box<dyn Any + Send + Sync>)>) -> Self {
-        Self {
-            sender,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<T> ProtocolHandler for IrohPacketHandler<T>
-where
-    for<'de> T: ProtocolPacket<'de> + 'static,
-{
-    fn accept(&self, connection: Connection) -> BoxFuture<'static, Result<()>> {
-        let cloned_sender = self.sender.clone();
-        Box::pin(async move {
-            let recv = connection.accept_uni().await;
-            let recv = recv?;
-            let from = connection
-                .remote_node_id()
-                .expect("Remote node should have an ID");
-
-            let mut handler: PacketHandler<T> = recv.into();
-            while let Some(packet) = handler.next().await {
-                cloned_sender.send((from, Box::new(packet)))?;
-            }
-            Ok(())
-        })
-    }
-}
-
-pub struct RecieveConnection<'a, T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    connections: MutexGuard<'a, IncomingPackets>,
-    _phantom: PhantomData<T>,
-}
-
-impl<'a, T> From<MutexGuard<'a, IncomingPackets>> for RecieveConnection<'a, T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    fn from(value: MutexGuard<'a, IncomingPackets>) -> RecieveConnection<'a, T> {
-        Self {
-            connections: value,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<T> Stream for RecieveConnection<'_, T>
-where
-    for<'de> T: ProtocolPacket<'de> + 'static,
-{
-    type Item = Result<Packet<T>, PacketHandlerError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if let Some((from, recv)) = ready!(this.connections.poll_recv(cx)) {
-            let packet: Result<T, PacketHandlerError> = *recv.downcast().expect("T should match generic parameter, this means poll_next was called with non T parameter, this should be impossible");
-            let packet = packet.map(|data| Packet::from((data, from)));
-            Poll::Ready(Some(packet))
-        } else {
-            Poll::Ready(None)
-        }
-    }
-}
-
-pub struct SendConnection<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    dispatcher: PacketDispatcher<T>,
-    _phantom: PhantomData<T>,
-}
-
-impl<T> From<SendStream> for SendConnection<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    fn from(value: SendStream) -> Self {
-        Self {
-            dispatcher: value.into(),
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<T> Sink<T> for SendConnection<T>
-where
-    for<'de> T: ProtocolPacket<'de>,
-{
-    type Error = PacketDispatcherError;
-
-    fn poll_ready(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Self::Error>> {
-        let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).poll_ready(cx)
-    }
-
-    fn start_send(self: Pin<&mut Self>, item: T) -> std::result::Result<(), Self::Error> {
-        let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).start_send(item)
-    }
-
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Self::Error>> {
-        let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).poll_flush(cx)
-    }
-
-    fn poll_close(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Self::Error>> {
-        let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).poll_close(cx)
-    }
-}
-
-type IncomingPackets = UnboundedReceiver<(NodeId, Box<dyn Any + Send + Sync>)>;
+mod dispatcher;
+mod handler;
+pub mod packet;
+mod protocol_handler;
+pub mod receive;
+pub mod send;
 
 pub struct BrokerBuilder {
     alpns: Vec<&'static str>,
@@ -415,7 +43,14 @@ impl BrokerBuilder {
         })
     }
 
-    pub fn add_protocol<T>(mut self) -> Self
+    pub fn add_service<'a, Service, Si, St>(self) -> Self
+    where
+        Service: ProtocolService<'a, Si, St>,
+    {
+        <Service as ProtocolService<Si, St>>::Protocols::add_protocols(self)
+    }
+
+    fn add_protocol<T>(mut self) -> Self
     where
         for<'de> T: ProtocolPacket<'de> + 'static,
     {
@@ -478,6 +113,8 @@ pub enum SendBrokerError {
     IrohError(#[from] anyhow::Error),
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
+    #[error("Cannot connect to self connecting to {0} which is the same address as this device")]
+    ConnectToSelfError(NodeId),
 }
 
 impl<'a> Broker {
@@ -503,13 +140,239 @@ impl<'a> Broker {
     where
         for<'de> T: ProtocolPacket<'de>,
     {
-        let connection = self
+        self.send_packet_sink_with_options(node, ConnectOptions::default())
+            .await
+    }
+
+    pub async fn send_packet_sink_with_options<T>(
+        &'a self,
+        node: NodeId,
+        options: ConnectOptions,
+    ) -> Result<SendConnection<T>, SendBrokerError>
+    where
+        for<'de> T: ProtocolPacket<'de>,
+    {
+        if node == self.router.endpoint().node_id() {
+            return Err(SendBrokerError::ConnectToSelfError(node));
+        }
+
+        let connecting = self
             .router
             .endpoint()
-            .connect(node, T::APLN.as_bytes())
+            .connect_with_opts(node, T::APLN.as_bytes(), options)
             .await?;
+
+        let connection = connecting.await?;
+
         let send_stream = connection.open_uni().await?;
 
         Ok(send_stream.into())
     }
+
+    pub async fn as_service<Service, Si, St>(&'a self) -> Service
+    where
+        Service: ProtocolService<'a, Si, St>,
+    {
+        Service::new(self).await
+    }
 }
+
+pub trait ServiceConstructor<'a>: Clone {
+    fn new(broker: &'a Broker) -> impl std::future::Future<Output = Self> + Send;
+}
+
+pub trait ProtocolService<'a, Si, St>: Send + Sync + ServiceConstructor<'a> {
+    type Protocols: ProtocolCollection;
+
+    type StreamError;
+    type SinkError;
+    type SinkInnerError;
+
+    fn stream(&self) -> Result<impl Stream<Item = St>, Self::StreamError>;
+
+    fn sink(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<impl Sink<Si, Error = Self::SinkInnerError>, Self::SinkError>,
+    > + Send;
+}
+
+pub trait ProtocolServiceMethods<'a, T, Si, St, Index>: ProtocolService<'a, Si, St>
+where
+    for<'de> T: ProtocolPacket<'de>,
+{
+    fn get_receive_connection(broker: &Broker) -> Result<RecieveConnection<T>, RecieveBrokerError>;
+
+    fn get_send_connection(
+        broker: &Broker,
+        node: NodeId,
+    ) -> impl Future<Output = Result<SendConnection<T>, SendBrokerError>> + Send + Sync;
+
+    fn get_send_connection_with_options(
+        broker: &Broker,
+        node: NodeId,
+        options: ConnectOptions,
+    ) -> impl Future<Output = Result<SendConnection<T>, SendBrokerError>> + Send + Sync;
+}
+
+impl<'a, Service, Si, St, T, Index> ProtocolServiceMethods<'a, T, Si, St, Index> for Service
+where
+    Service: ProtocolService<'a, Si, St>,
+    for<'de> T: ProtocolPacket<'de> + 'static,
+    Service::Protocols: GetConnection<T, Index>,
+{
+    fn get_receive_connection(broker: &Broker) -> Result<RecieveConnection<T>, RecieveBrokerError> {
+        <Self::Protocols as GetConnection<T, Index>>::get_receive_connection(broker)
+    }
+
+    async fn get_send_connection(
+        broker: &Broker,
+        node: NodeId,
+    ) -> Result<SendConnection<T>, SendBrokerError> {
+        <Self::Protocols as GetConnection<T, Index>>::get_send_connection(broker, node).await
+    }
+
+    async fn get_send_connection_with_options(
+        broker: &Broker,
+        node: NodeId,
+        options: ConnectOptions,
+    ) -> Result<SendConnection<T>, SendBrokerError> {
+        <Self::Protocols as GetConnection<T, Index>>::get_send_connection_with_options(
+            broker, node, options,
+        )
+        .await
+    }
+}
+
+pub trait ProtocolCollection {
+    fn add_protocols(builder: BrokerBuilder) -> BrokerBuilder;
+}
+
+pub struct Here;
+pub struct Later<T>(std::marker::PhantomData<T>);
+
+trait HasTypeAt<Index, T>
+where
+    for<'de> T: ProtocolPacket<'de>,
+{
+}
+impl<T, Tail> HasTypeAt<Here, T> for (T, Tail) where for<'de> T: ProtocolPacket<'de> {}
+impl<T, U, I, Tail> HasTypeAt<Later<I>, T> for (U, Tail)
+where
+    Tail: HasTypeAt<I, T>,
+    for<'de> T: ProtocolPacket<'de>,
+{
+}
+
+pub trait HasPacket<T, Index>
+where
+    for<'de> T: ProtocolPacket<'de>,
+{
+}
+
+impl<T, D, Index> HasPacket<T, Index> for D
+where
+    for<'de> T: ProtocolPacket<'de>,
+    D: AsNestedTuple,
+    D::Nested: HasTypeAt<Index, T>,
+{
+}
+
+trait GetConnection<T, Index>
+where
+    for<'de> T: ProtocolPacket<'de> + 'static,
+{
+    fn get_receive_connection(broker: &Broker) -> Result<RecieveConnection<T>, RecieveBrokerError> {
+        broker.recieve_packet_stream::<T>()
+    }
+
+    fn get_send_connection(
+        broker: &Broker,
+        node: NodeId,
+    ) -> impl Future<Output = Result<SendConnection<T>, SendBrokerError>> + Send + Sync {
+        async move { broker.send_packet_sink(node).await }
+    }
+
+    fn get_send_connection_with_options(
+        broker: &Broker,
+        node: NodeId,
+        options: ConnectOptions,
+    ) -> impl Future<Output = Result<SendConnection<T>, SendBrokerError>> + Send + Sync {
+        async move { broker.send_packet_sink_with_options(node, options).await }
+    }
+}
+
+impl<T, D, Index> GetConnection<T, Index> for D
+where
+    for<'de> T: ProtocolPacket<'de> + 'static,
+    D: HasPacket<T, Index>,
+{
+}
+
+pub trait AsNestedTuple {
+    type Nested;
+}
+
+macro_rules! nested_tuple {
+    () => {
+        ()
+    };
+    ($head:ty $(, $tail:ty)*) => {
+        ($head, nested_tuple!($($tail),*))
+    };
+}
+
+macro_rules! impl_as_nested_tuple_inner {
+    ($($types:ident),+) => {
+        impl<$($types),+> AsNestedTuple for ($($types,)+) {
+            type Nested = nested_tuple!($($types),*);
+        }
+    };
+}
+
+macro_rules! impl_as_nested_tuple {
+    ($head:ident $(, $tail:ident)* $(,)?) => {
+        impl_as_nested_tuple!(@impl $head $(, $tail)*);
+        impl_as_nested_tuple!($($tail),*);
+    };
+    () => {
+    };
+
+    (@impl $($name:ident),+) => {
+        impl_as_nested_tuple_inner!($($name),+);
+     };
+}
+
+impl_as_nested_tuple!(T, D, F, G, H, J, K, L, Z, X, C, V, B, N, M, Q);
+
+impl<T> ProtocolCollection for T
+where
+    for<'de> T: ProtocolPacket<'de> + 'static,
+{
+    fn add_protocols(builder: BrokerBuilder) -> BrokerBuilder {
+        builder.add_protocol::<T>()
+    }
+}
+
+macro_rules! impl_protocol_collection {
+    ($head:ident $(, $tail:ident)* $(,)?) => {
+        impl_protocol_collection!(@impl $head $(, $tail)*);
+        impl_protocol_collection!($($tail),*);
+    };
+    () => {};
+
+    (@impl $($name:ident),+) => {
+        impl<$($name),+> ProtocolCollection for ($($name),+,)
+        where
+            $(
+                for<'de> $name: ProtocolPacket<'de> + 'static,
+            )+
+        {
+            fn add_protocols(builder: BrokerBuilder) -> BrokerBuilder {
+                builder $(.add_protocol::<$name>())+
+            }
+        }
+    };
+}
+
+impl_protocol_collection!(T, D, F, G, H, J, K, L, Z, X, C, V, B, N, M, Q);

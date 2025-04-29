@@ -1,27 +1,82 @@
-use std::{any::TypeId, str::FromStr, time::Duration};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
-use futures_util::{SinkExt, StreamExt};
-use harmony_core::{Broker, BrokerBuilder, ProtocolPacket};
-use iroh::{PublicKey, SecretKey};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use harmony_core::{
+    Broker, BrokerBuilder, ProtocolPacket, ProtocolService, ProtocolServiceMethods,
+    ServiceConstructor,
+};
+use iroh::{
+    PublicKey, SecretKey,
+    endpoint::{ConnectOptions, TransportConfig},
+};
 use serde::{Deserialize, Serialize};
-use tokio::{task::JoinHandle, time::sleep};
+
+const PEER_2_ADDR: &str = "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Message {
     data: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct Message2 {
-    data: Vec<char>,
+impl From<String> for Message {
+    fn from(value: String) -> Self {
+        Self { data: value }
+    }
+}
+
+impl From<Message> for String {
+    fn from(value: Message) -> Self {
+        value.data
+    }
 }
 
 impl ProtocolPacket<'_> for Message {
     const APLN: &'static str = "message";
 }
 
-impl ProtocolPacket<'_> for Message2 {
-    const APLN: &'static str = "message2";
+#[derive(Clone)]
+pub struct ExampleService {
+    peer: PublicKey,
+    broker: Broker,
+}
+
+impl<'a> ServiceConstructor<'a> for ExampleService {
+    async fn new(broker: &'a Broker) -> ExampleService {
+        let server = PublicKey::from_str(PEER_2_ADDR).unwrap();
+        Self {
+            peer: server,
+            broker: broker.clone(),
+        }
+    }
+}
+
+impl ProtocolService<'_, String, String> for ExampleService {
+    type Protocols = (Message,);
+
+    type StreamError = anyhow::Error;
+
+    type SinkError = anyhow::Error;
+    type SinkInnerError = anyhow::Error;
+
+    fn stream(&self) -> anyhow::Result<impl Stream<Item = String>, Self::StreamError> {
+        let stream = Self::get_receive_connection(&self.broker)?;
+        Ok(stream.map(|x| x.unwrap().data().into()))
+    }
+
+    async fn sink(
+        &self,
+    ) -> Result<impl Sink<String, Error = Self::SinkInnerError>, Self::SinkError> {
+        let mut transport_options = TransportConfig::default();
+        transport_options.max_idle_timeout(None);
+        let connection_options =
+            ConnectOptions::new().with_transport_config(Arc::new(transport_options));
+        let sink =
+            Self::get_send_connection_with_options(&self.broker, self.peer, connection_options)
+                .await?;
+        Ok(Box::pin(
+            sink.with(async |message| Ok(Message::from(message))),
+        ))
+    }
 }
 
 #[tokio::main]
@@ -30,50 +85,32 @@ async fn main() {
     println!("key is {:#?}", key.public());
 
     let builder = BrokerBuilder::new(key).await.unwrap();
-    let server =
-        PublicKey::from_str("8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c")
-            .unwrap();
 
     let broker = builder
-        .add_protocol::<Message>()
-        .add_protocol::<Message2>()
+        .add_service::<ExampleService, String, String>()
         .build()
         .await
         .unwrap();
 
-    spawn_handler::<Message>(broker.clone());
-    spawn_handler::<Message2>(broker.clone());
+    let service = broker.as_service::<ExampleService, String, String>().await;
 
-    let message = Message {
-        data: "HAII".to_string(),
-    };
-
-    let message2 = Message2 {
-        data: vec!['h', 'a', 'i'],
-    };
-
-    let mut stream = broker.send_packet_sink::<Message>(server).await.unwrap();
-    let mut stream2 = broker.send_packet_sink::<Message2>(server).await.unwrap();
-
-    loop {
-        stream.send(message.clone()).await.unwrap();
-        sleep(Duration::from_secs(1)).await;
-        stream2.send(message2.clone()).await.unwrap();
-        sleep(Duration::from_secs(1)).await;
-    }
-}
-
-fn spawn_handler<T>(broker: Broker) -> JoinHandle<()>
-where
-    for<'de> T: ProtocolPacket<'de> + 'static,
-{
+    let send_service = service.clone();
+    let recv_service = service.clone();
     tokio::spawn(async move {
-        let mut stream = broker.recieve_packet_stream::<T>().unwrap();
-        while let Some(packet) = stream.next().await {
-            let packet = packet.unwrap();
-            println!("Packet from {:?} recieved", packet.from_node());
-            println!("Packet type is: {:?}", TypeId::of::<T>());
-            println!("Packet Contents: {:?}", packet.data());
+        loop {
+            let mut send = send_service.sink().await.unwrap();
+            while let Ok(()) = send.send("HAIIII".into()).await {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut recv = recv_service.stream().unwrap();
+        while let Some(packet) = recv.next().await {
+            println!("{}", packet);
         }
     })
+    .await
+    .unwrap();
 }
