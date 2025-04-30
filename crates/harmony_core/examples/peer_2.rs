@@ -3,7 +3,6 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use harmony_core::{
     Broker, BrokerBuilder, ProtocolPacket, ProtocolService, ProtocolServiceMethods,
-    ServiceConstructor,
 };
 use iroh::{
     PublicKey, SecretKey,
@@ -58,8 +57,20 @@ impl ProtocolService<'_, String, String> for ExampleService {
     type SinkError = anyhow::Error;
     type SinkInnerError = anyhow::Error;
 
+    async fn new(broker: &Broker) -> ExampleService {
+        let server = PublicKey::from_str(PEER_1_ADDR).unwrap();
+        Self {
+            peer: server,
+            broker: broker.clone(),
+        }
+    }
+
+    fn broker(&self) -> &Broker {
+        self.broker()
+    }
+
     fn stream(&self) -> anyhow::Result<impl Stream<Item = String>, Self::StreamError> {
-        let stream = Self::get_receive_connection(&self.broker)?;
+        let stream = self.get_receive_connection()?;
         Ok(stream.map(|x| x.unwrap().data().into()))
     }
 
@@ -70,9 +81,9 @@ impl ProtocolService<'_, String, String> for ExampleService {
         transport_options.max_idle_timeout(None);
         let connection_options =
             ConnectOptions::new().with_transport_config(Arc::new(transport_options));
-        let sink =
-            Self::get_send_connection_with_options(&self.broker, self.peer, connection_options)
-                .await?;
+        let sink = self
+            .get_send_connection_with_options(self.peer, connection_options)
+            .await?;
         Ok(Box::pin(
             sink.with(async |message| Ok(Message::from(message))),
         ))

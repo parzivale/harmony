@@ -177,16 +177,16 @@ impl<'a> Broker {
     }
 }
 
-pub trait ServiceConstructor<'a>: Clone {
-    fn new(broker: &'a Broker) -> impl std::future::Future<Output = Self> + Send;
-}
-
-pub trait ProtocolService<'a, Si, St>: Send + Sync + ServiceConstructor<'a> {
+pub trait ProtocolService<'a, Si, St>: Send + Sync {
     type Protocols: ProtocolCollection;
 
     type StreamError;
     type SinkError;
     type SinkInnerError;
+
+    fn new(broker: &'a Broker) -> impl std::future::Future<Output = Self> + Send;
+
+    fn broker(&self) -> &Broker;
 
     fn stream(&self) -> Result<impl Stream<Item = St>, Self::StreamError>;
 
@@ -201,15 +201,15 @@ pub trait ProtocolServiceMethods<'a, T, Si, St, Index>: ProtocolService<'a, Si, 
 where
     for<'de> T: ProtocolPacket<'de>,
 {
-    fn get_receive_connection(broker: &Broker) -> Result<RecieveConnection<T>, RecieveBrokerError>;
+    fn get_receive_connection(&self) -> Result<RecieveConnection<T>, RecieveBrokerError>;
 
     fn get_send_connection(
-        broker: &Broker,
+        &self,
         node: NodeId,
     ) -> impl Future<Output = Result<SendConnection<T>, SendBrokerError>> + Send + Sync;
 
     fn get_send_connection_with_options(
-        broker: &Broker,
+        &self,
         node: NodeId,
         options: ConnectOptions,
     ) -> impl Future<Output = Result<SendConnection<T>, SendBrokerError>> + Send + Sync;
@@ -221,24 +221,26 @@ where
     for<'de> T: ProtocolPacket<'de> + 'static,
     Service::Protocols: GetConnection<T, Index>,
 {
-    fn get_receive_connection(broker: &Broker) -> Result<RecieveConnection<T>, RecieveBrokerError> {
-        <Self::Protocols as GetConnection<T, Index>>::get_receive_connection(broker)
+    fn get_receive_connection(&self) -> Result<RecieveConnection<T>, RecieveBrokerError> {
+        <Self::Protocols as GetConnection<T, Index>>::get_receive_connection(self.broker())
     }
 
     async fn get_send_connection(
-        broker: &Broker,
+        &self,
         node: NodeId,
     ) -> Result<SendConnection<T>, SendBrokerError> {
-        <Self::Protocols as GetConnection<T, Index>>::get_send_connection(broker, node).await
+        <Self::Protocols as GetConnection<T, Index>>::get_send_connection(self.broker(), node).await
     }
 
     async fn get_send_connection_with_options(
-        broker: &Broker,
+        &self,
         node: NodeId,
         options: ConnectOptions,
     ) -> Result<SendConnection<T>, SendBrokerError> {
         <Self::Protocols as GetConnection<T, Index>>::get_send_connection_with_options(
-            broker, node, options,
+            self.broker(),
+            node,
+            options,
         )
         .await
     }
