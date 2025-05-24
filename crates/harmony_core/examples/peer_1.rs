@@ -2,10 +2,12 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use harmony_core::{
-    Broker, BrokerBuilder, ProtocolPacket, ProtocolService, ProtocolServiceMethods,
+    BrokerBuilder, ProtocolPacket, ProtocolService, ProtocolServiceDefinition,
+    ProtocolServiceDefinitionMethods, ProtocolServiceReceiveDefinition,
+    ProtocolServiceSendDefinition, builder::Broker,
 };
 use iroh::{
-    PublicKey, SecretKey,
+    NodeId, PublicKey, SecretKey,
     endpoint::{ConnectOptions, TransportConfig},
 };
 use serde::{Deserialize, Serialize};
@@ -33,50 +35,46 @@ impl ProtocolPacket<'_> for Message {
     const APLN: &'static str = "message";
 }
 
-#[derive(Clone)]
-pub struct ExampleService {
-    peer: PublicKey,
-    broker: Broker,
+pub struct ExampleService;
+
+impl ProtocolServiceDefinition for ExampleService {
+    type Protocols = (Message,);
 }
 
-impl ProtocolService<'_, String, String> for ExampleService {
-    type Protocols = (Message,);
+impl ProtocolServiceSendDefinition for ExampleService {
+    type SinkItem = String;
 
-    type StreamError = anyhow::Error;
+    type Error = anyhow::Error;
 
-    type SinkError = anyhow::Error;
-    type SinkInnerError = anyhow::Error;
-
-    async fn new(broker: &Broker) -> ExampleService {
-        let server = PublicKey::from_str(PEER_2_ADDR).unwrap();
-        Self {
-            peer: server,
-            broker: broker.clone(),
-        }
-    }
-
-    fn broker(&self) -> &Broker {
-        &self.broker
-    }
-
-    fn stream(&self) -> anyhow::Result<impl Stream<Item = String>, Self::StreamError> {
-        let stream = self.get_receive_connection()?;
-        Ok(stream.map(|x| x.unwrap().data().into()))
-    }
-
-    async fn sink(
+    async fn send_sink(
         &self,
-    ) -> Result<impl Sink<String, Error = Self::SinkInnerError>, Self::SinkError> {
+        broker: &Broker,
+        node: NodeId,
+    ) -> anyhow::Result<impl Sink<Self::SinkItem, Error = Self::Error>> {
         let mut transport_options = TransportConfig::default();
         transport_options.max_idle_timeout(None);
         let connection_options =
             ConnectOptions::new().with_transport_config(Arc::new(transport_options));
         let sink = self
-            .get_send_connection_with_options(self.peer, connection_options)
+            .get_send_connection_with_options(broker, node, connection_options)
             .await?;
         Ok(Box::pin(
             sink.with(async |message| Ok(Message::from(message))),
         ))
+    }
+}
+
+impl ProtocolServiceReceiveDefinition for ExampleService {
+    type StreamItem = String;
+
+    type Error = anyhow::Error;
+
+    fn recv_stream(
+        &self,
+        broker: &Broker,
+    ) -> anyhow::Result<impl Stream<Item = Self::StreamItem>, Self::Error> {
+        let stream = self.get_receive_connection(broker)?;
+        Ok(stream.map(|x| x.unwrap().data().into()))
     }
 }
 
@@ -88,28 +86,28 @@ async fn main() {
     let builder = BrokerBuilder::new(key).await.unwrap();
 
     let broker = builder
-        .add_service::<ExampleService, String, String>()
+        .add_service::<ExampleService>()
         .build()
         .await
         .unwrap();
 
-    let service = broker.as_service::<ExampleService, String, String>().await;
+    let peer = PublicKey::from_str(PEER_2_ADDR).unwrap();
+    let service = ProtocolService::new(&broker, ExampleService);
 
-    let send_service = service.clone();
-    let recv_service = service.clone();
+    let (send_service, recv_service) = service.service_channels();
+
     tokio::spawn(async move {
         loop {
-            let mut send = send_service.sink().await.unwrap();
-            while let Ok(()) = send.send("HAIIII".into()).await {
+            while let Ok(()) = send_service.send("HAIIII".into(), peer).await {
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         }
     });
 
     tokio::spawn(async move {
-        let mut recv = recv_service.stream().unwrap();
+        let mut recv = recv_service.receieve_stream().unwrap();
         while let Some(packet) = recv.next().await {
-            println!("{}", packet);
+            println!(" {}", packet);
         }
     })
     .await
