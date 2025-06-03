@@ -2,9 +2,13 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use harmony_core::{
-    BrokerBuilder, ProtocolPacket, ProtocolService, ProtocolServiceDefinition,
-    ProtocolServiceDefinitionMethods, ProtocolServiceReceiveDefinition,
-    ProtocolServiceSendDefinition, builder::Broker,
+    Broker, BrokerBuilder, ProtocolPacket,
+    broker::builder::OrgTriple,
+    service::{
+        ProtocolService, ProtocolServiceDefinition, ProtocolServiceDefinitionMethods,
+        recieve::ProtocolServiceReceiveDefinition,
+        send::{ProtocolSendService, ProtocolServiceSendDefinition},
+    },
 };
 use iroh::{
     NodeId, PublicKey, SecretKey,
@@ -35,46 +39,44 @@ impl ProtocolPacket<'_> for Message {
     const APLN: &'static str = "message";
 }
 
-pub struct ExampleService;
+pub struct ExampleServiceDefinition;
 
-impl ProtocolServiceDefinition for ExampleService {
+impl ProtocolServiceDefinition for ExampleServiceDefinition {
     type Protocols = (Message,);
+    type Tables = ();
 }
 
-impl ProtocolServiceSendDefinition for ExampleService {
+impl ProtocolServiceSendDefinition for ExampleServiceDefinition {
     type SinkItem = String;
 
     type Error = anyhow::Error;
 
     async fn send_sink(
-        &self,
+        definition: Arc<Self>,
         broker: &Broker,
         node: NodeId,
     ) -> anyhow::Result<impl Sink<Self::SinkItem, Error = Self::Error>> {
-        let mut transport_options = TransportConfig::default();
-        transport_options.max_idle_timeout(None);
-        let connection_options =
-            ConnectOptions::new().with_transport_config(Arc::new(transport_options));
-        let sink = self
-            .get_send_connection_with_options(broker, node, connection_options)
-            .await?;
+        let sink = definition.get_send_connection(broker, node).await?;
         Ok(Box::pin(
             sink.with(async |message| Ok(Message::from(message))),
         ))
     }
 }
 
-impl ProtocolServiceReceiveDefinition for ExampleService {
+impl ProtocolServiceReceiveDefinition for ExampleServiceDefinition {
     type StreamItem = String;
 
     type Error = anyhow::Error;
 
     fn recv_stream(
-        &self,
+        definition: Arc<Self>,
         broker: &Broker,
     ) -> anyhow::Result<impl Stream<Item = Self::StreamItem>, Self::Error> {
-        let stream = self.get_receive_connection(broker)?;
-        Ok(stream.map(|x| x.unwrap().data().into()))
+        let stream = definition.get_receive_connection(broker)?;
+        Ok(stream.map(|x| {
+            println!("received message");
+            x.unwrap().data().into()
+        }))
     }
 }
 
@@ -83,26 +85,33 @@ async fn main() {
     let key = SecretKey::from_bytes(&[2; 32]);
     println!("key is {:#?}", key.public());
 
-    let builder = BrokerBuilder::new(key).await.unwrap();
+    let triple = OrgTriple::new("com", "harmony", "peer1");
+    let builder = BrokerBuilder::new(key, triple).await.unwrap();
 
     let broker = builder
-        .add_service::<ExampleService>()
+        .add_service::<ExampleServiceDefinition>()
+        .unwrap()
         .build()
         .await
         .unwrap();
 
     let peer = PublicKey::from_str(PEER_2_ADDR).unwrap();
-    let service = ProtocolService::new(&broker, ExampleService);
+    let service = ProtocolService::new(&broker, ExampleServiceDefinition);
 
     let (send_service, recv_service) = service.service_channels();
 
-    tokio::spawn(async move {
+    async fn send_handler(
+        send_service: ProtocolSendService<ExampleServiceDefinition>,
+        peer: NodeId,
+    ) {
+        let mut send_service = send_service.send_sink(peer).await.unwrap();
         loop {
-            while let Ok(()) = send_service.send("HAIIII".into(), peer).await {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            send_service.send("HAII FROM PEER_1".into()).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    });
+    }
+
+    tokio::spawn(send_handler(send_service, peer));
 
     tokio::spawn(async move {
         let mut recv = recv_service.receieve_stream().unwrap();

@@ -35,6 +35,7 @@ where
         let cloned_sender = self.sender.clone();
         Box::pin(async move {
             let recv = connection.accept_uni().await;
+            println!("{:?}", recv);
             let recv = recv?;
             let from = connection
                 .remote_node_id()
@@ -42,6 +43,7 @@ where
 
             let mut handler: PacketHandler<T> = recv.into();
             while let Some(packet) = handler.next().await {
+                println!("got new packet");
                 cloned_sender.send((from, Box::new(packet)))?;
             }
             Ok(())

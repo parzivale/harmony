@@ -1,9 +1,0 @@
-[package]
-name = "harmony_message"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-protocol = {path = "../protocol"}
-harmony_core = {path = "../harmony_core"}
-thiserror = "2.0.12"

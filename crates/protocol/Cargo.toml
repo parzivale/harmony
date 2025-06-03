@@ -10,3 +10,5 @@ blake3 = { version = "1.8.2", features = ["serde"] }
 postcard = "1.1.1"
 ed25519-dalek = "2.1.1"
 iroh = "0.35.0"
+redb = "2.6.0"
+thiserror = "2.0.12"

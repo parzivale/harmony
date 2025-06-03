@@ -81,6 +81,7 @@ where
     for<'de> T: ProtocolPacket<'de>,
 {
     fn from(value: RecvStream) -> Self {
+        println!("constructed handler");
         Self {
             recv_stream: value,
             buffer: Vec::new(),

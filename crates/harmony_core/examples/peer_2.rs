@@ -2,9 +2,12 @@ use std::{str::FromStr, sync::Arc, time::Duration};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use harmony_core::{
-    Broker, BrokerBuilder, ProtocolPacket, ProtocolService, ProtocolServiceDefinition,
-    ProtocolServiceDefinitionMethods, ProtocolServiceReceiveDefinition,
-    ProtocolServiceSendDefinition,
+    Broker, BrokerBuilder, ProtocolPacket,
+    broker::builder::OrgTriple,
+    service::{
+        ProtocolService, ProtocolServiceDefinition, ProtocolServiceDefinitionMethods,
+        recieve::ProtocolServiceReceiveDefinition, send::ProtocolServiceSendDefinition,
+    },
 };
 use iroh::{
     NodeId, PublicKey, SecretKey,
@@ -39,6 +42,7 @@ pub struct ExampleServiceDefinition;
 
 impl ProtocolServiceDefinition for ExampleServiceDefinition {
     type Protocols = (Message,);
+    type Tables = ();
 }
 
 impl ProtocolServiceSendDefinition for ExampleServiceDefinition {
@@ -47,17 +51,13 @@ impl ProtocolServiceSendDefinition for ExampleServiceDefinition {
     type Error = anyhow::Error;
 
     async fn send_sink(
-        &self,
+        definition: Arc<Self>,
         broker: &Broker,
         node: NodeId,
     ) -> Result<impl Sink<Self::SinkItem, Error = Self::Error>, Self::Error> {
         let mut transport_options = TransportConfig::default();
         transport_options.max_idle_timeout(None);
-        let connection_options =
-            ConnectOptions::new().with_transport_config(Arc::new(transport_options));
-        let sink = self
-            .get_send_connection_with_options(broker, node, connection_options)
-            .await?;
+        let sink = definition.get_send_connection(broker, node).await?;
         Ok(Box::pin(
             sink.with(async |message| Ok(Message::from(message))),
         ))
@@ -70,10 +70,10 @@ impl ProtocolServiceReceiveDefinition for ExampleServiceDefinition {
     type Error = anyhow::Error;
 
     fn recv_stream(
-        &self,
+        definition: Arc<Self>,
         broker: &Broker,
     ) -> Result<impl Stream<Item = Self::StreamItem>, Self::Error> {
-        let stream = self.get_receive_connection(broker)?;
+        let stream = definition.get_receive_connection(broker)?;
         Ok(stream.map(|x| x.unwrap().data().into()))
     }
 }
@@ -83,10 +83,12 @@ async fn main() {
     let key = SecretKey::from_bytes(&[1; 32]);
     println!("key is {:#?}", key.public());
 
-    let builder = BrokerBuilder::new(key).await.unwrap();
+    let triple = OrgTriple::new("com", "harmony", "peer2");
+    let builder = BrokerBuilder::new(key, triple).await.unwrap();
 
     let broker = builder
         .add_service::<ExampleServiceDefinition>()
+        .unwrap()
         .build()
         .await
         .unwrap();
@@ -96,10 +98,8 @@ async fn main() {
 
     let (send_service, recv_service) = service.service_channels();
     tokio::spawn(async move {
-        loop {
-            while let Ok(()) = send_service.send("HAIIII".into(), peer).await {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+        while let Ok(()) = send_service.send("HAIIII FROM PEER_2".into(), peer).await {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
 

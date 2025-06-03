@@ -1,7 +1,7 @@
 use blake3::{Hash, Hasher};
 use ed25519_dalek::Signature;
-use harmony_core::ProtocolPacket;
-use iroh::{PublicKey, SecretKey};
+use harmony_core::{Broker, ProtocolPacket};
+use iroh::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, time::SystemTime};
 
@@ -20,7 +20,7 @@ impl Message {
         message: &str,
         previous: Option<Hash>,
         sent_at: SystemTime,
-        secret_key: SecretKey,
+        broker: &Broker,
     ) -> Self {
         let sent_at = sent_at
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -31,15 +31,14 @@ impl Message {
             message: message.to_string(),
             previous,
             sent_at,
-            signature: secret_key.sign(message.as_bytes()),
+            signature: broker.sign(message.as_bytes()),
         }
     }
 
-    pub fn as_hash(&self) -> postcard::Result<Hash> {
-        let buf = Vec::new();
-        let mut hasher = Hasher::new();
-        let as_bytes = postcard::to_io(&self, buf)?;
-        hasher.update(&as_bytes);
+    pub fn as_hash(&self, buf: &mut Vec<u8>, hasher: &mut Hasher) -> postcard::Result<Hash> {
+        let as_bytes = postcard::to_io(&self, &mut *buf)?;
+        hasher.update(as_bytes);
+        buf.clear();
         Ok(hasher.finalize())
     }
 

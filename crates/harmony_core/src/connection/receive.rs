@@ -9,7 +9,7 @@ use futures_util::{Stream, ready};
 use iroh::NodeId;
 use tokio::sync::{MutexGuard, mpsc::UnboundedReceiver};
 
-use crate::{ProtocolPacket, handler::PacketHandlerError, packet::Packet};
+use crate::{ProtocolPacket, handler::PacketHandlerError, protocol::packet::Packet};
 
 pub type IncomingPackets = UnboundedReceiver<(NodeId, Box<dyn Any + Send + Sync>)>;
 
