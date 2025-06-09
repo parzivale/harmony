@@ -9,10 +9,7 @@ use harmony_core::{
         recieve::ProtocolServiceReceiveDefinition, send::ProtocolServiceSendDefinition,
     },
 };
-use iroh::{
-    NodeId, PublicKey, SecretKey,
-    endpoint::{ConnectOptions, TransportConfig},
-};
+use iroh::{NodeId, PublicKey, SecretKey, endpoint::TransportConfig};
 use serde::{Deserialize, Serialize};
 
 const PEER_1_ADDR: &str = "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394";
@@ -98,7 +95,13 @@ async fn main() {
 
     let (send_service, recv_service) = service.service_channels();
     tokio::spawn(async move {
-        while let Ok(()) = send_service.send("HAIIII FROM PEER_2".into(), peer).await {
+        while let Ok(()) = send_service
+            .send_sink(peer)
+            .await
+            .unwrap()
+            .send("HAIIII FROM PEER_2".into())
+            .await
+        {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });

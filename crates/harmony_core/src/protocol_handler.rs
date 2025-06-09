@@ -3,7 +3,11 @@ use std::{any::Any, marker::PhantomData};
 use crate::{ProtocolPacket, handler::PacketHandler};
 use anyhow::Result;
 use futures_util::{StreamExt, future::BoxFuture};
-use iroh::{NodeId, endpoint::Connection, protocol::ProtocolHandler};
+use iroh::{
+    NodeId,
+    endpoint::{Connection, ConnectionClose, TransportErrorCode},
+    protocol::ProtocolHandler,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
@@ -34,16 +38,25 @@ where
     fn accept(&self, connection: Connection) -> BoxFuture<'static, Result<()>> {
         let cloned_sender = self.sender.clone();
         Box::pin(async move {
-            let recv = connection.accept_uni().await;
-            println!("{:?}", recv);
-            let recv = recv?;
+            let recv = match connection.accept_uni().await {
+                Ok(recv) => recv,
+                Err(err) => match err {
+                    iroh::endpoint::ConnectionError::ConnectionClosed(ConnectionClose {
+                        error_code: TransportErrorCode::NO_ERROR,
+                        frame_type: _,
+                        reason: _,
+                    }) => {
+                        return Ok(());
+                    }
+                    err => return Err(err.into()),
+                },
+            };
             let from = connection
                 .remote_node_id()
                 .expect("Remote node should have an ID");
 
             let mut handler: PacketHandler<T> = recv.into();
             while let Some(packet) = handler.next().await {
-                println!("got new packet");
                 cloned_sender.send((from, Box::new(packet)))?;
             }
             Ok(())

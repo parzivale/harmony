@@ -1,8 +1,14 @@
 pub struct WriteTransaction(pub(crate) redb::WriteTransaction);
 pub struct ReadTransaction(pub(crate) redb::ReadTransaction);
 
-pub struct WriteTransactionResult<T>(pub(crate) redb::WriteTransaction, pub(crate) T);
-pub struct ReadTransactionResult<T>(pub(crate) redb::ReadTransaction, pub(crate) T);
+pub struct WriteTransactionResult<T> {
+    pub(crate) transaction: redb::WriteTransaction,
+    pub(crate) result: T,
+}
+pub struct ReadTransactionResult<T> {
+    pub(crate) transaction: redb::ReadTransaction,
+    pub(crate) result: Option<T>,
+}
 
 impl From<redb::WriteTransaction> for WriteTransaction {
     fn from(value: redb::WriteTransaction) -> Self {
@@ -18,12 +24,18 @@ impl From<redb::ReadTransaction> for ReadTransaction {
 
 impl WriteTransaction {
     pub fn finish<T>(self, result: T) -> WriteTransactionResult<T> {
-        WriteTransactionResult(self.0, result)
+        WriteTransactionResult {
+            transaction: self.0,
+            result,
+        }
     }
 }
 
 impl ReadTransaction {
-    pub fn finish<T>(self, result: T) -> ReadTransactionResult<T> {
-        ReadTransactionResult(self.0, result)
+    pub fn finish<T>(self, result: Option<T>) -> ReadTransactionResult<T> {
+        ReadTransactionResult {
+            transaction: self.0,
+            result,
+        }
     }
 }

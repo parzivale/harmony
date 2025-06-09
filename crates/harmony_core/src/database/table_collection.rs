@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     BrokerBuilder,
     broker::builder::BrokerBuilderError,
@@ -37,69 +35,54 @@ where
 {
     fn read_get(
         key: T::Key,
-        transaction: ReadTransaction,
-    ) -> impl Future<Output = Result<Option<T::Value>, DatabaseError<T>>> + Send {
-        async move {
-            tokio::task::spawn_blocking(move || {
-                transaction
-                    .0
-                    .open_table(T::definition())?
-                    .get(T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?)
-                    .map(|value| {
-                        value
-                            .map(|value| T::deserialize_value(value.value()))
-                            .transpose()
-                            .map_err(DatabaseError::from_deserializer_error)
-                    })?
-            })
-            .await?
-        }
+        transaction: &ReadTransaction,
+    ) -> Result<Option<T::Value>, DatabaseError<T>> {
+        transaction
+            .0
+            .open_table(T::definition())?
+            .get(T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?)
+            .map(|value| {
+                value
+                    .map(|value| T::deserialize_value(value.value()))
+                    .transpose()
+                    .map_err(DatabaseError::from_deserializer_error)
+            })?
     }
 
     fn write_get(
         key: T::Key,
-        transaction: WriteTransaction,
-    ) -> impl Future<Output = Result<Option<T::Value>, DatabaseError<T>>> + Send {
-        async move {
-            tokio::task::spawn_blocking(move || {
-                transaction
-                    .0
-                    .open_table(T::definition())?
-                    .get(T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?)
-                    .map(|value| {
-                        value
-                            .map(|value| T::deserialize_value(value.value()))
-                            .transpose()
-                            .map_err(DatabaseError::from_deserializer_error)
-                    })?
-            })
-            .await?
-        }
+        transaction: &WriteTransaction,
+    ) -> Result<Option<T::Value>, DatabaseError<T>> {
+        transaction
+            .0
+            .open_table(T::definition())?
+            .get(T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?)
+            .map(|value| {
+                value
+                    .map(|value| T::deserialize_value(value.value()))
+                    .transpose()
+                    .map_err(DatabaseError::from_deserializer_error)
+            })?
     }
 
     fn insert(
         key: T::Key,
         value: T::Value,
-        transaction: WriteTransaction,
-    ) -> impl Future<Output = Result<Option<T::Value>, DatabaseError<T>>> + Send {
-        async move {
-            tokio::task::spawn_blocking(move || {
-                transaction
-                    .0
-                    .open_table(T::definition())?
-                    .insert(
-                        T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?,
-                        T::serialize_value(value).map_err(DatabaseError::from_serializer_error)?,
-                    )
-                    .map(|value| {
-                        value
-                            .map(|value| T::deserialize_value(value.value()))
-                            .transpose()
-                            .map_err(DatabaseError::from_deserializer_error)
-                    })?
-            })
-            .await?
-        }
+        transaction: &WriteTransaction,
+    ) -> Result<Option<T::Value>, DatabaseError<T>> {
+        transaction
+            .0
+            .open_table(T::definition())?
+            .insert(
+                T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?,
+                T::serialize_value(value).map_err(DatabaseError::from_serializer_error)?,
+            )
+            .map(|value| {
+                value
+                    .map(|value| T::deserialize_value(value.value()))
+                    .transpose()
+                    .map_err(DatabaseError::from_deserializer_error)
+            })?
     }
 }
 

@@ -1,9 +1,10 @@
 use std::{any::TypeId, collections::BTreeMap, fs, marker::PhantomData, sync::Arc};
 
+use anyhow::Context;
 use directories::ProjectDirs;
 use iroh::{
     Endpoint, RelayMode, SecretKey,
-    protocol::{self, Router, RouterBuilder},
+    protocol::{Router, RouterBuilder},
 };
 use redb::{Database, DatabaseError};
 use thiserror::Error;
@@ -98,6 +99,7 @@ impl<Services> BrokerBuilder<Services> {
         <Service as ProtocolServiceDefinition>::Tables::add_tables(this)
     }
 
+    // This method should never be exposed to endusers as it is used internally for service registration
     pub(crate) fn add_protocol<T>(mut self) -> Result<BrokerBuilder<Services>, BrokerBuilderError>
     where
         for<'de> T: ProtocolPacket<'de> + 'static,
@@ -128,6 +130,7 @@ impl<Services> BrokerBuilder<Services> {
         })
     }
 
+    // This method should never be exposed to endusers as it is used internally for service registration
     pub(crate) fn add_table<T>(mut self) -> Result<BrokerBuilder<Services>, BrokerBuilderError>
     where
         for<'a> T: DatabaseTable,
@@ -160,7 +163,10 @@ impl<Services> BrokerBuilder<Services> {
 
     pub async fn build(self) -> anyhow::Result<Broker<Services>> {
         Ok(Broker {
-            db: Arc::new(self.get_database()?),
+            db: Arc::new(
+                self.get_database()
+                    .context("Failed to construct database for the broker")?,
+            ),
             alpns: Arc::new(self.alpns),
             router: Arc::new(self.builder.spawn().await?),
             handlers: Arc::new(self.handlers),

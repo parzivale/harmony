@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use futures_util::{Sink, SinkExt};
+use futures_util::Sink;
 use iroh::NodeId;
-use tokio::pin;
 
 use crate::Broker;
 
@@ -28,25 +27,13 @@ impl<ServiceDefinition> ProtocolSendService<ServiceDefinition>
 where
     ServiceDefinition: ProtocolServiceSendDefinition,
 {
-    pub async fn send(
-        &self,
-        item: ServiceDefinition::SinkItem,
-        node: NodeId,
-    ) -> Result<(), ServiceDefinition::Error> {
-        let fut = <ServiceDefinition as ProtocolServiceSendDefinition>::send_sink(
-            Arc::clone(&self.definition),
-            &self.broker,
-            node,
-        )
-        .await?;
-        pin!(fut);
-        fut.send(item).await
-    }
-
     pub async fn send_sink(
         &self,
         node: NodeId,
-    ) -> Result<impl Sink<ServiceDefinition::SinkItem>, ServiceDefinition::Error> {
+    ) -> Result<
+        impl Sink<ServiceDefinition::SinkItem, Error = ServiceDefinition::Error>,
+        ServiceDefinition::Error,
+    > {
         <ServiceDefinition as ProtocolServiceSendDefinition>::send_sink(
             Arc::clone(&self.definition),
             &self.broker,

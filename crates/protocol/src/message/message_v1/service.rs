@@ -1,26 +1,28 @@
 use std::{array::TryFromSliceError, sync::Arc, time::SystemTime};
 
 use crate::message::v1::{message::Message, retransmit::Retransmit};
-use blake3::{Hash, Hasher};
+use blake3::Hash;
 use harmony_core::{
-    Broker, NodeId, PacketDispatcherError, ProtocolPacket, Sink, SinkExt,
+    Broker, FutureExt, NodeId, PacketDispatcherError, Sink, SinkExt,
     broker::SendBrokerError,
     connection::send::SendConnection,
-    database::DatabaseTable,
+    database::{
+        DatabaseTable, table_collection::DatabaseError, transaction::ReadTransactionResult,
+    },
+    ready,
     service::{
-        ProtocolServiceDefinition, ProtocolServiceDefinitionMethods,
+        DatabaseManagerMethods, DatabaseTableDefinitionMethods, ProtocolServiceDefinition,
+        ProtocolServiceDefinitionMethods, TransactionFutureError,
         send::ProtocolServiceSendDefinition,
     },
 };
-use redb::{Database, StorageError, TableDefinition, TableError, TransactionError};
-use serde::{Deserialize, Serialize};
+use redb::{StorageError, TableError, TransactionError};
 use thiserror::Error;
 
-const MESSAGE_TABLE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("messages");
-const LAST_MESSAGE: TableDefinition<&[u8; 32], &[u8; 32]> = TableDefinition::new("last_message");
-
+use super::message::MessageHasher;
 
 pub struct MessagesTable;
+pub struct LastMessageTable;
 
 #[derive(Debug, Error)]
 pub enum MessagesTableError {}
@@ -34,37 +36,57 @@ impl DatabaseTable for MessagesTable {
 
     type Error = MessagesTableError;
 
-    fn serialize_key<'s>(data: Self::Key) -> Result<&'s [u8], Self::Error> {
+    fn serialize_key<'s>(_: Self::Key) -> Result<&'s [u8], Self::Error> {
         todo!()
     }
 
-    fn deserialize_key(data: &[u8]) -> Result<Self::Key, Self::Error> {
+    fn deserialize_key(_: &[u8]) -> Result<Self::Key, Self::Error> {
         todo!()
     }
 
-    fn serialize_value<'s>(data: Self::Value) -> Result<&'s [u8], Self::Error> {
+    fn serialize_value<'s>(_: Self::Value) -> Result<&'s [u8], Self::Error> {
         todo!()
     }
 
-    fn deserialize_value(data: &[u8]) -> Result<Self::Value, Self::Error> {
+    fn deserialize_value(_: &[u8]) -> Result<Self::Value, Self::Error> {
         todo!()
     }
 }
 
-pub struct MessageServiceDefinition {
-    db: Arc<Database>,
-}
+#[derive(Debug, Error)]
+pub enum LastMessageTableError {}
 
-impl MessageServiceDefinition {
-    pub fn get_database(&self) -> Arc<Database> {
-        Arc::clone(&self.db)
+impl DatabaseTable for LastMessageTable {
+    type Key = NodeId;
+
+    type Value = Message;
+
+    const NAME: &'static str = "Messages";
+
+    type Error = MessagesTableError;
+
+    fn serialize_key<'s>(_: Self::Key) -> Result<&'s [u8], Self::Error> {
+        todo!()
+    }
+
+    fn deserialize_key(_: &[u8]) -> Result<Self::Key, Self::Error> {
+        todo!()
+    }
+
+    fn serialize_value<'s>(_: Self::Value) -> Result<&'s [u8], Self::Error> {
+        todo!()
+    }
+
+    fn deserialize_value(_: &[u8]) -> Result<Self::Value, Self::Error> {
+        todo!()
     }
 }
+pub struct MessageServiceDefinition;
 
 impl ProtocolServiceDefinition for MessageServiceDefinition {
     type Protocols = (Message, Retransmit);
 
-    type Tables = (MessagesTable,);
+    type Tables = (MessagesTable, LastMessageTable);
 }
 
 #[derive(Debug, Error)]
@@ -83,16 +105,19 @@ pub enum SendMessageError {
     PostcardError(#[from] postcard::Error),
     #[error(transparent)]
     TryFromSliceError(#[from] TryFromSliceError),
+    #[error(transparent)]
+    ReadTransactionFutureError(#[from] TransactionFutureError),
 }
 
 pub struct MessageSink {
     broker: Broker,
     definition: Arc<MessageServiceDefinition>,
-    hasher: Hasher,
-    hash_buffer: Vec<u8>,
-    message_buffer: Vec<u8>,
+    previous: Option<Message>,
+    message_hasher: MessageHasher,
     sink: SendConnection<Message>,
     node: NodeId,
+    messages: Vec<(String, SystemTime)>,
+    flushing: bool,
 }
 
 impl MessageSink {
@@ -102,17 +127,15 @@ impl MessageSink {
         node: NodeId,
         sink: SendConnection<Message>,
     ) -> Self {
-        let hasher = Hasher::new();
-        let hash_buffer = Vec::new();
-        let message_buffer = Vec::new();
         Self {
             broker: broker.clone(),
             definition,
-            hasher,
-            hash_buffer,
-            message_buffer,
+            previous: None,
             sink,
             node,
+            messages: Vec::new(),
+            flushing: false,
+            message_hasher: MessageHasher::new(),
         }
     }
 }
@@ -130,34 +153,8 @@ impl Sink<String> for MessageSink {
 
     fn start_send(self: std::pin::Pin<&mut Self>, item: String) -> Result<(), Self::Error> {
         let this = self.get_mut();
-        let last_message = this.broker.read_transation(|transaction| {
-            
-        })
-        let last_message = this
-            .definition
-            .db
-            .begin_read()?
-            .open_table(LAST_MESSAGE)?
-            .get(this.node.as_bytes())?
-            .map(|slice| Hash::from_slice(slice.value()))
-            .transpose()?;
-        let message = Message::new(&item, last_message, SystemTime::now(), &this.broker);
-        let message_hash = message.as_hash(&mut this.hash_buffer, &mut this.hasher)?;
-        this.definition
-            .db
-            .begin_write()?
-            .open_table(MESSAGE_TABLE)?
-            .insert(
-                message_hash.as_bytes(),
-                message.as_bytes(&mut this.message_buffer)?.as_slice(),
-            )?;
-        this.message_buffer.clear();
-        this.definition
-            .db
-            .begin_write()?
-            .open_table(LAST_MESSAGE)?
-            .insert(this.node.as_bytes(), message_hash.as_bytes())?;
-        this.sink.start_send_unpin(message).map_err(Into::into)
+        this.messages.push((item, SystemTime::now()));
+        Ok(())
     }
 
     fn poll_flush(
@@ -165,7 +162,52 @@ impl Sink<String> for MessageSink {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        this.sink.poll_flush_unpin(cx).map_err(Into::into)
+        if this.flushing {
+            match this.sink.poll_flush_unpin(cx) {
+                std::task::Poll::Ready(result) => {
+                    this.flushing = false;
+                    std::task::Poll::Ready(result.map_err(Into::into))
+                }
+                std::task::Poll::Pending => todo!(),
+            }
+        } else {
+            let previous = if this.previous.is_some() {
+                &mut this.previous
+            } else {
+                let nodeid = this.node;
+                &mut ready!(
+                    this.definition
+                        .read_transaction(
+                            &this.broker,
+                            move |definition,
+                                  transaction|
+                                  -> Result<
+                                ReadTransactionResult<Message>,
+                                DatabaseError<LastMessageTable>,
+                            > {
+                                let message = definition
+                                    .with_table::<LastMessageTable>()
+                                    .read_get(nodeid, &transaction)?;
+                                Ok(transaction.finish(message))
+                            }
+                        )
+                        .poll_unpin(cx)
+                )?
+            };
+
+            for (message, time) in &mut this.messages {
+                let _ = Message::new(
+                    message,
+                    previous
+                        .as_mut()
+                        .map(|message| message.as_hash(&mut this.message_hasher))
+                        .transpose()?,
+                    *time,
+                    &this.broker,
+                );
+            }
+            this.sink.poll_flush_unpin(cx).map_err(Into::into)
+        }
     }
 
     fn poll_close(

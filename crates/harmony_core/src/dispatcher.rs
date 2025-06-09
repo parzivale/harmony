@@ -5,7 +5,7 @@ use std::{
 };
 
 use futures_util::{Sink, ready};
-use iroh::endpoint::{ClosedStream, SendStream, WriteError};
+use iroh::endpoint::{ClosedStream, SendStream, StoppedError, WriteError};
 use thiserror::Error;
 
 use crate::ProtocolPacket;
@@ -44,6 +44,8 @@ pub enum PacketDispatcherError {
     WriteError(#[from] WriteError),
     #[error(transparent)]
     StreamClosed(#[from] ClosedStream),
+    #[error(transparent)]
+    StoppedError(#[from] StoppedError),
 }
 
 impl<T> Sink<T> for PacketDispatcher<T>
@@ -88,6 +90,9 @@ where
         let this = self.get_mut();
         ready!(Sink::poll_flush(Pin::new(this), cx))?;
         this.send_stream.finish()?;
+        let fut = this.send_stream.stopped();
+        tokio::pin!(fut);
+        ready!(fut.poll(cx))?;
         Poll::Ready(Ok(()))
     }
 }

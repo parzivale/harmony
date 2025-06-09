@@ -1,14 +1,13 @@
 pub mod builder;
 use std::{any::TypeId, collections::BTreeMap, marker::PhantomData, sync::Arc};
 
-use directories::ProjectDirs;
 use ed25519_dalek::Signature;
 use iroh::{
     NodeId,
     endpoint::{ConnectOptions, ConnectionError},
     protocol::Router,
 };
-use redb::{CommitError, Database, DatabaseError, TransactionError};
+use redb::Database;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -18,23 +17,7 @@ use crate::{
         receive::{IncomingPackets, RecieveConnection},
         send::SendConnection,
     },
-    database::{
-        DatabaseTable,
-        table_collection::DatabaseTableCollection,
-        transaction::{
-            ReadTransaction, ReadTransactionResult, WriteTransaction, WriteTransactionResult,
-        },
-    },
 };
-
-pub fn get_project_dir() -> ProjectDirs {
-    ProjectDirs::from("com", "parzivale", "harmony").unwrap()
-}
-
-pub fn get_database() -> Result<Database, DatabaseError> {
-    let database_path = get_project_dir().project_path().join("database.redb");
-    Database::create(database_path)
-}
 
 pub struct Broker<Protocols = ()> {
     pub(crate) alpns: Arc<Vec<&'static str>>,
@@ -69,7 +52,7 @@ pub enum SendBrokerError {
     IrohError(#[from] anyhow::Error),
     #[error(transparent)]
     ConnectionError(#[from] ConnectionError),
-    #[error("Cannot connect to self connecting to {0} which is the same address as this device")]
+    #[error("Cannot connect to self. Connecting to {0} which is the same address as this device")]
     ConnectToSelfError(NodeId),
 }
 impl<'a, Services> Broker<Services> {
@@ -82,34 +65,6 @@ impl<'a, Services> Broker<Services> {
             tables: self.tables,
             db: self.db,
         }
-    }
-
-    pub async fn read_transaction<F, E, Fut, FutErr, T, Def>(&self, func: F) -> Result<T, E>
-    where
-        F: Fn(ReadTransaction) -> Fut,
-        Fut: Future<Output = Result<ReadTransactionResult<T>, FutErr>>,
-        E: From<TransactionError>,
-        FutErr: Into<E>,
-        Def: DatabaseTableCollection,
-    {
-        func(self.db.begin_read()?.into())
-            .await
-            .map(|result| result.1)
-            .map_err(Into::into)
-    }
-
-    pub async fn write_transaction<F, E, Fut, FutErr, T>(&self, func: F) -> Result<T, E>
-    where
-        F: Fn(WriteTransaction) -> Fut,
-        Fut: Future<Output = Result<WriteTransactionResult<T>, FutErr>>,
-        E: From<TransactionError> + From<CommitError>,
-        FutErr: Into<E>,
-    {
-        let result = func(self.db.begin_write()?.into())
-            .await
-            .map_err(Into::into)?;
-        result.0.commit()?;
-        Ok(result.1)
     }
 
     pub fn sign(&self, msg: &[u8]) -> Signature {

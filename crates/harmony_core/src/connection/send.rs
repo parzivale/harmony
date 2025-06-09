@@ -12,6 +12,9 @@ use crate::{
     dispatcher::{PacketDispatcher, PacketDispatcherError},
 };
 
+// It is important to explicitly call .close() on the connection to ensure the peer has recieved
+// all remaning data. Otherwise if the connection is dropped while open the SendConnection will
+// forceably terminate the connection and possibly cause the peer to lose data.
 pub struct SendConnection<T>
 where
     for<'de> T: ProtocolPacket<'de>,

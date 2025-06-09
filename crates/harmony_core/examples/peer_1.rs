@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::Duration};
+use std::{str::FromStr, sync::Arc};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use harmony_core::{
@@ -6,14 +6,10 @@ use harmony_core::{
     broker::builder::OrgTriple,
     service::{
         ProtocolService, ProtocolServiceDefinition, ProtocolServiceDefinitionMethods,
-        recieve::ProtocolServiceReceiveDefinition,
-        send::{ProtocolSendService, ProtocolServiceSendDefinition},
+        recieve::ProtocolServiceReceiveDefinition, send::ProtocolServiceSendDefinition,
     },
 };
-use iroh::{
-    NodeId, PublicKey, SecretKey,
-    endpoint::{ConnectOptions, TransportConfig},
-};
+use iroh::{NodeId, PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 
 const PEER_2_ADDR: &str = "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
@@ -73,10 +69,7 @@ impl ProtocolServiceReceiveDefinition for ExampleServiceDefinition {
         broker: &Broker,
     ) -> anyhow::Result<impl Stream<Item = Self::StreamItem>, Self::Error> {
         let stream = definition.get_receive_connection(broker)?;
-        Ok(stream.map(|x| {
-            println!("received message");
-            x.unwrap().data().into()
-        }))
+        Ok(stream.map(|x| x.unwrap().data().into()))
     }
 }
 
@@ -100,18 +93,11 @@ async fn main() {
 
     let (send_service, recv_service) = service.service_channels();
 
-    async fn send_handler(
-        send_service: ProtocolSendService<ExampleServiceDefinition>,
-        peer: NodeId,
-    ) {
-        let mut send_service = send_service.send_sink(peer).await.unwrap();
-        loop {
-            send_service.send("HAII FROM PEER_1".into()).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-
-    tokio::spawn(send_handler(send_service, peer));
+    tokio::spawn(async move {
+        let mut send_sink = send_service.send_sink(peer).await.unwrap();
+        send_sink.send("HAII FROM PEER_1".into()).await.unwrap();
+        send_sink.close().await.unwrap();
+    });
 
     tokio::spawn(async move {
         let mut recv = recv_service.receieve_stream().unwrap();

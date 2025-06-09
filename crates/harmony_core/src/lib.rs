@@ -5,10 +5,11 @@ pub use broker::{
     builder::{BrokerBuilder, BrokerBuilderError},
 };
 pub use dispatcher::PacketDispatcherError;
-pub use futures_util::{Sink, SinkExt, Stream, StreamExt};
+pub use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt, ready};
 pub use iroh::{NodeId, endpoint::ConnectOptions};
 pub use protocol::packet::ProtocolPacket;
 use protocol::protocol_collection::ProtocolCollection;
+pub use tokio::pin;
 use tuple_utils::AsNestedTuple;
 
 pub mod broker;

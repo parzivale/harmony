@@ -15,6 +15,35 @@ pub struct Message {
     signature: Signature,
 }
 
+#[derive(Default)]
+pub struct MessageHasher {
+    buffer: Vec<u8>,
+    hasher: Hasher,
+}
+
+impl MessageHasher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn buffer(&mut self) -> &mut Vec<u8> {
+        &mut self.buffer
+    }
+
+    fn update(&mut self) {
+        self.hasher.update(&self.buffer);
+    }
+
+    fn finalize(&self) -> Hash {
+        self.hasher.finalize()
+    }
+
+    fn clear(&mut self) {
+        self.buffer.clear();
+        self.hasher.reset();
+    }
+}
+
 impl Message {
     pub fn new(
         message: &str,
@@ -35,11 +64,12 @@ impl Message {
         }
     }
 
-    pub fn as_hash(&self, buf: &mut Vec<u8>, hasher: &mut Hasher) -> postcard::Result<Hash> {
-        let as_bytes = postcard::to_io(&self, &mut *buf)?;
-        hasher.update(as_bytes);
-        buf.clear();
-        Ok(hasher.finalize())
+    pub fn as_hash(&self, hasher: &mut MessageHasher) -> postcard::Result<Hash> {
+        postcard::to_io(&self, hasher.buffer())?;
+        hasher.update();
+        let hash = Ok(hasher.finalize());
+        hasher.clear();
+        hash
     }
 
     pub fn matches_hash(&self, hash: Option<Hash>) -> bool {
