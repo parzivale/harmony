@@ -7,7 +7,7 @@ use std::{fmt::Display, time::SystemTime};
 
 use crate::message;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
     previous: Option<Hash>,
     message: String,
@@ -49,7 +49,7 @@ impl Message {
         message: &str,
         previous: Option<Hash>,
         sent_at: SystemTime,
-        broker: &Broker,
+        signature: Signature,
     ) -> Self {
         let sent_at = sent_at
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -60,7 +60,7 @@ impl Message {
             message: message.to_string(),
             previous,
             sent_at,
-            signature: broker.sign(message.as_bytes()),
+            signature,
         }
     }
 

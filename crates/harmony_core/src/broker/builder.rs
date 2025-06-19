@@ -80,6 +80,7 @@ impl BrokerBuilder {
         })
     }
 }
+
 impl<Services> BrokerBuilder<Services> {
     pub fn add_service<Service>(
         self,

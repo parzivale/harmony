@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{marker::PhantomData, pin::Pin, sync::Arc, task::Poll};
 
-use futures_util::Sink;
+use futures_util::{FutureExt, Sink, StreamExt, ready};
 use iroh::NodeId;
 
 use crate::Broker;

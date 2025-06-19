@@ -6,12 +6,14 @@ edition = "2024"
 [workspace]
 members = ["crates/*"]
 
-[dependencies]
+[workspace.dependencies]
 iroh = "0.34.1"
 postcard = "1.1.1"
+tokio = { version = "1.44.2", features = ["full"] }
+
+[dependencies]
 rand = "0.8"
 serde = "1.0.219"
-tokio = { version = "1.44.2", features = ["full"] }
 
 harmony_core = { path = "./crates/harmony_core"}
 protocol = { path = "./crates/protocol" }

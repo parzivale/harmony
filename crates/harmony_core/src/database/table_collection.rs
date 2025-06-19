@@ -40,7 +40,11 @@ where
         transaction
             .0
             .open_table(T::definition())?
-            .get(T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?)
+            .get(
+                T::serialize_key(key)
+                    .map_err(DatabaseError::from_serializer_error)?
+                    .as_slice(),
+            )
             .map(|value| {
                 value
                     .map(|value| T::deserialize_value(value.value()))
@@ -56,7 +60,11 @@ where
         transaction
             .0
             .open_table(T::definition())?
-            .get(T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?)
+            .get(
+                T::serialize_key(key)
+                    .map_err(DatabaseError::from_serializer_error)?
+                    .as_slice(),
+            )
             .map(|value| {
                 value
                     .map(|value| T::deserialize_value(value.value()))
@@ -74,8 +82,12 @@ where
             .0
             .open_table(T::definition())?
             .insert(
-                T::serialize_key(key).map_err(DatabaseError::from_serializer_error)?,
-                T::serialize_value(value).map_err(DatabaseError::from_serializer_error)?,
+                T::serialize_key(key)
+                    .map_err(DatabaseError::from_serializer_error)?
+                    .as_slice(),
+                T::serialize_value(value)
+                    .map_err(DatabaseError::from_serializer_error)?
+                    .as_slice(),
             )
             .map(|value| {
                 value

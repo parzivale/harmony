@@ -13,11 +13,11 @@ pub trait DatabaseTable: 'static {
         const { TableDefinition::new(Self::NAME) }
     }
 
-    fn serialize_key<'s>(data: Self::Key) -> Result<&'s [u8], Self::Error>;
+    fn serialize_key(data: Self::Key) -> Result<Vec<u8>, Self::Error>;
 
     fn deserialize_key(data: &[u8]) -> Result<Self::Key, Self::Error>;
 
-    fn serialize_value<'s>(data: Self::Value) -> Result<&'s [u8], Self::Error>;
+    fn serialize_value(data: Self::Value) -> Result<Vec<u8>, Self::Error>;
 
     fn deserialize_value(data: &[u8]) -> Result<Self::Value, Self::Error>;
 }
