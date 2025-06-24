@@ -16,7 +16,7 @@ pub mod broker;
 pub mod connection;
 pub mod database;
 mod dispatcher;
-mod handler;
+pub mod handler;
 pub mod protocol;
 mod protocol_handler;
 pub mod service;

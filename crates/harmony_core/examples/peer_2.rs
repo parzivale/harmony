@@ -91,7 +91,7 @@ async fn main() {
         .unwrap();
 
     let peer = PublicKey::from_str(PEER_1_ADDR).unwrap();
-    let service = ProtocolService::new(&broker, ExampleServiceDefinition);
+    let (service, _) = ProtocolService::new(broker, ExampleServiceDefinition);
 
     let (send_service, recv_service) = service.service_channels();
     tokio::spawn(async move {

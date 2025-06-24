@@ -4,7 +4,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_util::Sink;
+use futures_util::{Sink, SinkExt};
 use iroh::endpoint::SendStream;
 
 use crate::{
@@ -46,12 +46,12 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).poll_ready(cx)
+        this.dispatcher.poll_ready_unpin(cx)
     }
 
     fn start_send(self: Pin<&mut Self>, item: T) -> std::result::Result<(), Self::Error> {
         let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).start_send(item)
+        this.dispatcher.start_send_unpin(item)
     }
 
     fn poll_flush(
@@ -59,7 +59,7 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).poll_flush(cx)
+        this.dispatcher.poll_flush_unpin(cx)
     }
 
     fn poll_close(
@@ -67,6 +67,6 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), Self::Error>> {
         let this = self.get_mut();
-        Pin::new(&mut this.dispatcher).poll_close(cx)
+        this.dispatcher.poll_close_unpin(cx)
     }
 }

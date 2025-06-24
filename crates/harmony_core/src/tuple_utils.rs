@@ -1,9 +1,24 @@
 pub struct Here;
 pub struct Later<T>(std::marker::PhantomData<T>);
 
-pub trait HasTypeAt<Index, T> {}
+pub trait HasTypeAt<I, T> {}
 impl<T, Tail> HasTypeAt<Here, T> for (T, Tail) {}
 impl<T, U, I, Tail> HasTypeAt<Later<I>, T> for (U, Tail) where Tail: HasTypeAt<I, T> {}
+
+pub trait Remove<Index, T> {
+    type Output;
+}
+
+impl<T, Tail> Remove<Here, T> for (T, Tail) {
+    type Output = Tail;
+}
+
+impl<H, Tail, T, Index> Remove<Later<Index>, T> for (H, Tail)
+where
+    Tail: Remove<Index, T>,
+{
+    type Output = (H, <Tail as Remove<Index, T>>::Output);
+}
 
 pub trait AsNestedTuple<Tail> {
     type Nested;

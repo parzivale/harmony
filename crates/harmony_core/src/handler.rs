@@ -43,35 +43,31 @@ where
     for<'de> T: ProtocolPacket<'de>,
 {
     type Item = Result<T, PacketHandlerError>;
-
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if !this.buffer.is_empty() {
-            return match this.take_from_bytes() {
-                Ok(NextPacketStatus::Packet(packet)) => Poll::Ready(Some(Ok(packet))),
-                Ok(NextPacketStatus::BytesRemaining) => Poll::Pending,
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
-            };
-        }
-        let read_fut = this.recv_stream.read_buf(&mut this.buffer);
-        tokio::pin!(read_fut);
 
-        match ready!(read_fut.as_mut().poll(cx)) {
-            Ok(0) => Poll::Ready(None),
-            Ok(_) => match this.take_from_bytes() {
-                Ok(NextPacketStatus::Packet(packet)) => Poll::Ready(Some(Ok(packet))),
-                Ok(NextPacketStatus::BytesRemaining) => Poll::Pending,
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
-            },
-            Err(err) => match err.downcast::<ReadError>() {
-                Ok(err) => match err {
-                    ReadError::ConnectionLost(ConnectionError::ApplicationClosed(_)) => {
-                        Poll::Ready(None)
+        loop {
+            match this.take_from_bytes() {
+                Ok(NextPacketStatus::Packet(packet)) => return Poll::Ready(Some(Ok(packet))),
+                Ok(NextPacketStatus::BytesRemaining) => {
+                    // Buffer doesn't have a full packet, need to poll for more data
+                    let read_fut = this.recv_stream.read_buf(&mut this.buffer);
+                    tokio::pin!(read_fut);
+
+                    match ready!(read_fut.as_mut().poll(cx)) {
+                        Ok(0) => return Poll::Ready(None),
+                        Ok(_) => continue, // More data, loop again to attempt parsing
+                        Err(err) => match err.downcast::<ReadError>() {
+                            Ok(ReadError::ConnectionLost(ConnectionError::ApplicationClosed(
+                                _,
+                            ))) => return Poll::Ready(None),
+                            Ok(e) => return Poll::Ready(Some(Err(e.into()))),
+                            Err(e) => return Poll::Ready(Some(Err(e.into()))),
+                        },
                     }
-                    err => Poll::Ready(Some(Err(err.into()))),
-                },
-                Err(err) => Poll::Ready(Some(Err(err.into()))),
-            },
+                }
+                Err(err) => return Poll::Ready(Some(Err(err.into()))),
+            }
         }
     }
 }

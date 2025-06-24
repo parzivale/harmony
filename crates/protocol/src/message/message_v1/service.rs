@@ -1,18 +1,17 @@
 use std::{
-    any::Any,
     array::TryFromSliceError,
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::SystemTime,
 };
 
 use crate::message::v1::{message::Message, retransmit::Retransmit};
 use blake3::Hash;
 use harmony_core::{
-    Broker, FutureExt, NodeId, PacketDispatcherError, Sink, SinkExt, Stream,
-    broker::SendBrokerError,
-    connection::send::SendConnection,
+    Broker, NodeId, PacketDispatcherError, Sink, SinkExt, Stream, StreamExt,
+    broker::{RecieveBrokerError, SendBrokerError},
+    connection::{receive::RecieveConnection, send::SendConnection},
     database::{
         DatabaseTable,
         transaction::{ReadTransactionResult, WriteTransactionResult},
@@ -21,11 +20,18 @@ use harmony_core::{
     service::{
         DatabaseManagerMethods, DatabaseTableDefinitionMethods, ProtocolServiceDefinition,
         ProtocolServiceDefinitionMethods, TransactionFutureError,
-        send::ProtocolServiceSendDefinition,
+        recieve::ProtocolServiceReceiveDefinition, send::ProtocolServiceSendDefinition,
     },
 };
 use redb::{StorageError, TableError, TransactionError};
 use thiserror::Error;
+use tokio::{
+    sync::{
+        Mutex,
+        mpsc::{UnboundedSender, error::SendError, unbounded_channel},
+    },
+    task::JoinHandle,
+};
 
 use super::message::MessageHasher;
 
@@ -72,7 +78,7 @@ impl DatabaseTable for LastMessageTable {
 
     type Value = Hash;
 
-    const NAME: &'static str = "Messages";
+    const NAME: &'static str = "LastMessage";
 
     type Error = MessagesTableError;
 
@@ -92,9 +98,81 @@ impl DatabaseTable for LastMessageTable {
         postcard::from_bytes(bytes).map_err(Into::into)
     }
 }
-pub struct MessageServiceDefinition;
 
-impl ProtocolServiceDefinition for MessageServiceDefinition {
+pub struct MessageService {
+    send: UnboundedSender<(NodeId, Vec<(Hash, Message)>, Hash)>,
+    send_handle: JoinHandle<()>,
+    previous_map: Mutex<BTreeMap<NodeId, Option<Hash>>>,
+}
+
+impl MessageService {
+    pub fn new<Services: Send + 'static>(broker: &Broker<Services>) -> MessageService {
+        let (send, mut recv) = unbounded_channel::<(NodeId, Vec<(Hash, Message)>, Hash)>();
+        let cloned_broker = broker.clone();
+        let send_handle = tokio::task::spawn(async move {
+            while let Some((node, mut messages, prev)) = recv.recv().await {
+                Self::write_transaction(
+                    &cloned_broker,
+                    move |manager, tx| -> Result<WriteTransactionResult<()>, TransactionFutureError> {
+                        manager
+                            .with_table::<LastMessageTable>()
+                            .insert(node, prev, &tx)?;
+
+                        while let Some((hash, message)) = messages.pop() {
+                            manager
+                                .with_table::<MessagesTable>()
+                                .insert(hash, message, &tx)?;
+                        }
+                        Ok(tx.finish(()))
+                    },
+                );
+            }
+        });
+        Self {
+            send,
+            send_handle,
+            previous_map: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub async fn fetch_latest_message_hash(
+        broker: &Broker,
+        node: NodeId,
+    ) -> Result<Option<Hash>, TransactionFutureError> {
+        match MessageService::read_transaction(
+            broker,
+            move |manager, tx| -> Result<ReadTransactionResult<Hash>, TransactionFutureError> {
+                let hash = manager
+                    .with_table::<LastMessageTable>()
+                    .read_get(node, &tx)?;
+                Ok(tx.finish(hash))
+            },
+        )
+        .await
+        {
+            Ok(res) => Ok(res),
+            Err(TransactionFutureError::TableError(TableError::TableDoesNotExist(_))) => {
+                MessageService::write_transaction(broker, move |manager, tx|  -> Result<WriteTransactionResult<()>, TransactionFutureError>{
+                    manager.with_table::<LastMessageTable>().create_table(&tx)?;
+                    Ok(tx.finish(()))
+                })
+                .await?;
+
+                MessageService::read_transaction(
+                    broker,
+                    move |manager, tx| -> Result<ReadTransactionResult<Hash>, TransactionFutureError> {
+                    let hash = manager
+                        .with_table::<LastMessageTable>()
+                        .read_get(node, &tx)?;
+                    Ok(tx.finish(hash))
+                }).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl ProtocolServiceDefinition for MessageService {
     type Protocols = (Message, Retransmit);
 
     type Tables = (MessagesTable, LastMessageTable);
@@ -118,43 +196,38 @@ pub enum SendMessageError {
     TryFromSliceError(#[from] TryFromSliceError),
     #[error(transparent)]
     ReadTransactionFutureError(#[from] TransactionFutureError),
+    #[error(transparent)]
+    SendError(#[from] SendError<(NodeId, Vec<(Hash, Message)>, Hash)>),
 }
 
 pub type MessageSinkFuture<T> =
     Option<Pin<Box<(dyn Future<Output = Result<T, TransactionFutureError>> + Send)>>>;
 
-pub struct MessageSink {
+struct MessageSink {
     broker: Broker,
-    definition: Arc<MessageServiceDefinition>,
-    previous: Option<Hash>,
+    definition: Arc<MessageService>,
     message_hasher: MessageHasher,
     sink: SendConnection<Message>,
     node: NodeId,
     unprocessed_messages: VecDeque<(String, SystemTime)>,
-    processed_messages: Arc<Mutex<Vec<(Message, Hash)>>>,
-    flushing: bool,
-    new_last_message_fut: MessageSinkFuture<()>,
+    processed_messages: Vec<(Hash, Message)>,
 }
 
 impl MessageSink {
     pub fn new(
         broker: &Broker,
-        definition: Arc<MessageServiceDefinition>,
+        definition: Arc<MessageService>,
         node: NodeId,
         sink: SendConnection<Message>,
-        previous: Option<Hash>,
     ) -> Self {
         Self {
             broker: broker.clone(),
             definition,
-            previous,
             sink,
             node,
             unprocessed_messages: VecDeque::new(),
-            processed_messages: Arc::new(Mutex::new(Vec::new())),
-            flushing: false,
+            processed_messages: Vec::new(),
             message_hasher: MessageHasher::new(),
-            new_last_message_fut: None,
         }
     }
 }
@@ -167,9 +240,6 @@ impl Sink<String> for MessageSink {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        if this.flushing {
-            return std::task::Poll::Pending;
-        }
         this.sink.poll_ready_unpin(cx).map_err(Into::into)
     }
 
@@ -185,71 +255,38 @@ impl Sink<String> for MessageSink {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
-        // if the sink is still flushing we shouldn't
-        // push more messages through
-        ready!(this.sink.poll_ready_unpin(cx))?;
-        let mut processed_messages = match this.processed_messages.try_lock() {
-            Ok(queue) => queue,
-            Err(std::sync::TryLockError::WouldBlock) => return std::task::Poll::Pending,
-            Err(e) => panic!("{}", e),
+        ready!(this.sink.poll_flush_unpin(cx)?);
+        let mut map = match this.definition.previous_map.try_lock() {
+            Ok(ok) => ok,
+            Err(_) => return std::task::Poll::Pending,
         };
-        this.flushing = true;
 
-        // needs to be last as we use .pop to remove
-        // elements as its o(1) time
-        while let Some((message_text, time)) = this.unprocessed_messages.front() {
-            let signature = this.broker.sign(message_text.as_bytes());
-            let message = Message::new(message_text, this.previous, *time, signature);
+        if let Some(current_prev) = map.get_mut(&this.node) {
+            while let Some((message_text, time)) = this.unprocessed_messages.front() {
+                let signature = this.broker.sign(message_text.as_bytes());
+                let message = Message::new(message_text, *current_prev, *time, signature);
 
-            // these will be moved/copied into the futures
-            let message_hash = message.as_hash(&mut this.message_hasher)?;
+                // these will be moved/copied into the futures
+                let message_hash = message.as_hash(&mut this.message_hasher)?;
+                this.sink.start_send_unpin(message.clone())?;
+                this.processed_messages.push((message_hash, message));
 
-            this.sink.start_send_unpin(message.clone())?;
-            processed_messages.push((message, message_hash));
-
-            this.previous = Some(message_hash);
-            this.unprocessed_messages.pop_front();
-        }
-        if let Some(prev) = this.previous {
-            let poll = this
-                .new_last_message_fut
-                .get_or_insert_with(|| {
-                    let messages = Arc::clone(&this.processed_messages);
-                    let node = this.node;
-                    this.definition
-                            .write_transaction(
-                                &this.broker,
-                                move |manager,
-                                      tx|
-                                      -> Result<
-                                    WriteTransactionResult<()>,
-                                    TransactionFutureError,
-                                > {
-                                    manager
-                                        .with_table::<LastMessageTable>()
-                                        .insert(node, prev, &tx)?;
-
-                                    while let Some((message, hash)) = messages.lock().unwrap().pop()
-                                    {
-                                        manager
-                                            .with_table::<MessagesTable>()
-                                            .insert(hash, message, &tx)?;
-                                    }
-                                    Ok(tx.finish(()))
-                                },
-                            )
-                            .boxed()
-                })
-                .poll_unpin(cx);
-
-            ready!(poll)?;
-            this.new_last_message_fut = None;
-
-            ready!(this.sink.flush().poll_unpin(cx))?;
-            this.flushing = false;
-            std::task::Poll::Ready(Ok(()))
+                *current_prev = Some(message_hash);
+                this.unprocessed_messages.pop_front();
+            }
+            if let Some(prev) = current_prev {
+                this.definition.send.send((
+                    this.node,
+                    this.processed_messages.drain(..).collect(),
+                    *prev,
+                ))?;
+                ready!(this.sink.poll_flush_unpin(cx)?);
+                std::task::Poll::Ready(Ok(()))
+            } else {
+                std::task::Poll::Ready(Ok(()))
+            }
         } else {
-            std::task::Poll::Ready(Ok(()))
+            todo!();
         }
     }
 
@@ -263,7 +300,7 @@ impl Sink<String> for MessageSink {
     }
 }
 
-impl ProtocolServiceSendDefinition for MessageServiceDefinition {
+impl ProtocolServiceSendDefinition for MessageService {
     type SinkItem = String;
 
     type Error = SendMessageError;
@@ -276,49 +313,80 @@ impl ProtocolServiceSendDefinition for MessageServiceDefinition {
         let connection: SendConnection<Message> =
             definition.get_send_connection(broker, node).await?;
 
-        let last_message = definition
-            .read_transaction(
-                broker,
-                move |manager, tx| -> Result<ReadTransactionResult<Hash>, TransactionFutureError> {
-                    let msg = manager
-                        .with_table::<LastMessageTable>()
-                        .read_get(node, &tx)?;
-                    Ok(tx.finish(msg))
-                },
-            )
-            .await?;
+        if let Entry::Vacant(e) = definition.previous_map.lock().await.entry(node) {
+            e.insert(MessageService::fetch_latest_message_hash(broker, node).await?);
+        }
 
-        Ok(MessageSink::new(
-            broker,
-            definition,
-            node,
-            connection,
-            last_message,
-        ))
+        Ok(MessageSink::new(broker, definition, node, connection))
     }
 }
 
-pub struct MessageStream {
+pub struct MessageStream<'a> {
     broker: Broker,
-    definition: Arc<MessageServiceDefinition>,
+    definition: Arc<MessageService>,
+    stream: RecieveConnection<'a, Message>,
 }
 
-impl MessageStream {
-    pub fn new(broker: &Broker, definition: Arc<MessageServiceDefinition>) -> Self {
+impl<'a> MessageStream<'a> {
+    pub fn new(
+        broker: &Broker,
+        definition: Arc<MessageService>,
+        stream: RecieveConnection<'a, Message>,
+    ) -> Self {
         Self {
             broker: broker.clone(),
             definition: Arc::clone(&definition),
+            stream,
         }
     }
 }
 
-impl Stream for MessageStream {
-    type Item = Message;
+#[derive(Debug)]
+pub struct MessageWithNode {
+    message: Message,
+    from: NodeId,
+}
+
+#[derive(Debug, Error)]
+pub enum RecieveMessageError {
+    #[error(transparent)]
+    RecieveBrokerError(#[from] RecieveBrokerError),
+}
+
+impl<'a> Stream for MessageStream<'a> {
+    type Item = MessageWithNode;
 
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        todo!()
+        let this = self.get_mut();
+        let packet = match ready!(this.stream.poll_next_unpin(cx)) {
+            Some(Ok(message)) => message,
+            _ => return std::task::Poll::Ready(None),
+        };
+
+        let from = packet.from_node();
+        let data = packet.data();
+
+        std::task::Poll::Ready(Some(MessageWithNode {
+            message: data,
+            from,
+        }))
+    }
+}
+
+impl ProtocolServiceReceiveDefinition for MessageService {
+    type StreamItem = MessageWithNode;
+
+    type Error = RecieveMessageError;
+
+    fn recv_stream(
+        definition: Arc<Self>,
+        broker: &Broker,
+    ) -> Result<impl Stream<Item = Self::StreamItem>, Self::Error> {
+        let connection: RecieveConnection<'_, Message> = broker.recieve_packet_stream()?;
+
+        Ok(MessageStream::new(broker, definition, connection))
     }
 }

@@ -20,7 +20,7 @@ use crate::{
         },
     },
     protocol::protocol_collection::{GetConnection, ProtocolCollection},
-    tuple_utils::HasTypeAt,
+    tuple_utils::{HasTypeAt, Remove},
 };
 
 pub mod recieve;
@@ -38,14 +38,30 @@ impl<ServiceDefinition> ProtocolService<ServiceDefinition>
 where
     ServiceDefinition: ProtocolServiceDefinition,
 {
-    pub fn new<Services, Index>(broker: &Broker<Services>, definition: ServiceDefinition) -> Self
+    pub fn new<Services, Index>(
+        broker: Broker<Services>,
+        definition: ServiceDefinition,
+    ) -> (
+        Self,
+        Broker<<Services as Remove<Index, ServiceDefinition>>::Output>,
+    )
     where
-        Services: HasTypeAt<Index, ServiceDefinition>,
+        Services: HasTypeAt<Index, ServiceDefinition> + Remove<Index, ServiceDefinition>,
     {
-        Self {
-            definition: Arc::new(definition),
-            broker: broker.clone().clear_type(),
-        }
+        (
+            Self {
+                definition: Arc::new(definition),
+                broker: broker.clone().clear_type(),
+            },
+            Broker {
+                alpns: broker.alpns,
+                tables: broker.tables,
+                router: broker.router,
+                handlers: broker.handlers,
+                db: broker.db,
+                protocols: PhantomData,
+            },
+        )
     }
 }
 
@@ -206,12 +222,12 @@ where
     }
 }
 
-impl<T> From<&T> for TableManager<T>
+impl<T> TableManager<T>
 where
     T: ProtocolServiceDefinition,
 {
-    fn from(_value: &T) -> Self {
-        Self {
+    pub fn new() -> Self {
+        TableManager {
             _inner: PhantomData,
         }
     }
@@ -222,7 +238,7 @@ where
     A: Send,
     Service: ProtocolServiceDefinition + Unpin + 'static,
     Err: Into<TransactionFutureError> + Send + Unpin,
-    F: Fn(TableManager<Service>, ReadTransaction) -> Result<ReadTransactionResult<A>, Err>
+    F: FnMut(TableManager<Service>, ReadTransaction) -> Result<ReadTransactionResult<A>, Err>
         + Send
         + Unpin
         + 'static,
@@ -272,7 +288,7 @@ where
     A: Send + 'static,
     Service: ProtocolServiceDefinition + Unpin + 'static,
     Err: Into<TransactionFutureError> + Send + Unpin,
-    F: Fn(TableManager<Service>, ReadTransaction) -> Result<ReadTransactionResult<A>, Err>
+    F: FnMut(TableManager<Service>, ReadTransaction) -> Result<ReadTransactionResult<A>, Err>
         + Send
         + Unpin
         + 'static,
@@ -300,7 +316,7 @@ where
                 let db = Arc::clone(&this.db);
                 let func = this.func.take();
                 let mut task = tokio::task::spawn_blocking(move || {
-                    if let Some(func) = func {
+                    if let Some(mut func) = func {
                         func(manager, db.begin_read()?.into()).map_err(Into::into)
                     } else {
                         panic!("Somehow the func for the readtransaction future was stolen");
@@ -324,7 +340,7 @@ where
     A: Send,
     Service: ProtocolServiceDefinition + Unpin + 'static,
     Err: Into<TransactionFutureError> + Send + Unpin,
-    F: Fn(TableManager<Service>, WriteTransaction) -> Result<WriteTransactionResult<A>, Err>
+    F: FnMut(TableManager<Service>, WriteTransaction) -> Result<WriteTransactionResult<A>, Err>
         + Send
         + Unpin
         + 'static,
@@ -340,7 +356,7 @@ where
     A: Send + 'static,
     Service: ProtocolServiceDefinition + Unpin + 'static,
     Err: Into<TransactionFutureError> + Send + Unpin,
-    F: Fn(TableManager<Service>, WriteTransaction) -> Result<WriteTransactionResult<A>, Err>
+    F: FnMut(TableManager<Service>, WriteTransaction) -> Result<WriteTransactionResult<A>, Err>
         + Send
         + Unpin
         + 'static,
@@ -368,7 +384,7 @@ where
                 let db = Arc::clone(&this.db);
                 let func = this.func.take();
                 let mut task = tokio::task::spawn_blocking(move || {
-                    if let Some(func) = func {
+                    if let Some(mut func) = func {
                         func(manager, db.begin_write()?.into()).map_err(Into::into)
                     } else {
                         panic!("Somehow the func for the writetransaction future was stolen");
@@ -391,44 +407,44 @@ pub trait DatabaseTableDefinitionMethods: ProtocolServiceDefinition + Sized
 where
     Self: Unpin + 'static,
 {
-    fn read_transaction<F, Err, A>(
-        &self,
-        broker: &Broker,
+    fn read_transaction<F, Err, A, Services>(
+        broker: &Broker<Services>,
         func: F,
     ) -> ReadTransactionFuture<Self, F, Err, A>
     where
-        F: Fn(TableManager<Self>, ReadTransaction) -> Result<ReadTransactionResult<A>, Err>
+        F: FnMut(TableManager<Self>, ReadTransaction) -> Result<ReadTransactionResult<A>, Err>
             + Send
             + Unpin
             + 'static,
         Err: Into<TransactionFutureError> + Send + Unpin,
         A: Send + 'static,
+        Services: Send + 'static,
     {
         ReadTransactionFuture {
             task: None,
             db: Arc::clone(&broker.db),
-            manager: self.into(),
+            manager: TableManager::new(),
             func: Some(func),
         }
     }
 
-    fn write_transaction<F, Err, A>(
-        &self,
-        broker: &Broker,
+    fn write_transaction<F, Err, A, Services>(
+        broker: &Broker<Services>,
         func: F,
     ) -> WriteTransactionFuture<Self, F, Err, A>
     where
-        F: Fn(TableManager<Self>, WriteTransaction) -> Result<WriteTransactionResult<A>, Err>
+        F: FnMut(TableManager<Self>, WriteTransaction) -> Result<WriteTransactionResult<A>, Err>
             + Send
             + Unpin
             + 'static,
         Err: Into<TransactionFutureError> + Send + Unpin,
         A: Send + 'static,
+        Services: Send + 'static,
     {
         WriteTransactionFuture {
             task: None,
             db: Arc::clone(&broker.db),
-            manager: self.into(),
+            manager: TableManager::new(),
             func: Some(func),
         }
     }
@@ -443,22 +459,24 @@ pub trait DatabaseManagerMethods<T, Index>
 where
     T: DatabaseTable,
 {
+    fn create_table(&self, transaction: &WriteTransaction) -> Result<(), DatabaseError<T>>;
+
     fn read_get(
         &self,
-        key: T::Key,
+        key: impl Into<T::Key>,
         transaction: &ReadTransaction,
     ) -> Result<Option<T::Value>, DatabaseError<T>>;
 
     fn write_get(
         &self,
-        key: T::Key,
+        key: impl Into<T::Key>,
         transaction: &WriteTransaction,
     ) -> Result<Option<T::Value>, DatabaseError<T>>;
 
     fn insert(
         &self,
-        key: T::Key,
-        value: T::Value,
+        key: impl Into<T::Key>,
+        value: impl Into<T::Value>,
         transaction: &WriteTransaction,
     ) -> Result<Option<T::Value>, DatabaseError<T>>;
 }
@@ -469,29 +487,33 @@ where
     T: DatabaseTable,
     Service::Tables: TableMethods<T, Index>,
 {
+    fn create_table(&self, transaction: &WriteTransaction) -> Result<(), DatabaseError<T>> {
+        <Service::Tables as TableMethods<T, Index>>::create_table(transaction)
+    }
+
     fn read_get(
         &self,
-        key: <T as DatabaseTable>::Key,
+        key: impl Into<<T as DatabaseTable>::Key>,
         transaction: &ReadTransaction,
     ) -> Result<Option<T::Value>, DatabaseError<T>> {
-        <Service::Tables as TableMethods<T, Index>>::read_get(key, transaction)
+        <Service::Tables as TableMethods<T, Index>>::read_get(key.into(), transaction)
     }
 
     fn write_get(
         &self,
-        key: <T as DatabaseTable>::Key,
+        key: impl Into<<T as DatabaseTable>::Key>,
         transaction: &WriteTransaction,
     ) -> Result<Option<<T as DatabaseTable>::Value>, DatabaseError<T>> {
-        <Service::Tables as TableMethods<T, Index>>::write_get(key, transaction)
+        <Service::Tables as TableMethods<T, Index>>::write_get(key.into(), transaction)
     }
 
     fn insert(
         &self,
-        key: <T as DatabaseTable>::Key,
-        value: <T as DatabaseTable>::Value,
+        key: impl Into<<T as DatabaseTable>::Key>,
+        value: impl Into<<T as DatabaseTable>::Value>,
         transaction: &WriteTransaction,
     ) -> Result<Option<<T as DatabaseTable>::Value>, DatabaseError<T>> {
-        <Service::Tables as TableMethods<T, Index>>::insert(key, value, transaction)
+        <Service::Tables as TableMethods<T, Index>>::insert(key.into(), value.into(), transaction)
     }
 }
 

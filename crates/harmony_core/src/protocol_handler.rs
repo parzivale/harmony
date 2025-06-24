@@ -48,7 +48,9 @@ where
                     }) => {
                         return Ok(());
                     }
-                    err => return Err(err.into()),
+                    err => {
+                        return Err(err.into());
+                    }
                 },
             };
             let from = connection

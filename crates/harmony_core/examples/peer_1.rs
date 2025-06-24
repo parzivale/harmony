@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use harmony_core::{
@@ -11,6 +11,7 @@ use harmony_core::{
 };
 use iroh::{NodeId, PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
+use tokio::time::sleep;
 
 const PEER_2_ADDR: &str = "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
 
@@ -89,14 +90,15 @@ async fn main() {
         .unwrap();
 
     let peer = PublicKey::from_str(PEER_2_ADDR).unwrap();
-    let service = ProtocolService::new(&broker, ExampleServiceDefinition);
+    let (service, _) = ProtocolService::new(broker, ExampleServiceDefinition);
 
     let (send_service, recv_service) = service.service_channels();
 
     tokio::spawn(async move {
         let mut send_sink = send_service.send_sink(peer).await.unwrap();
-        send_sink.send("HAII FROM PEER_1".into()).await.unwrap();
-        send_sink.close().await.unwrap();
+        while let Ok(()) = send_sink.send("HAII FROM PEER_1".into()).await {
+            sleep(Duration::from_secs(1)).await
+        }
     });
 
     tokio::spawn(async move {

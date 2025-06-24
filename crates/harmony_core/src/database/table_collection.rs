@@ -33,6 +33,14 @@ pub trait TableMethods<T, Index>
 where
     T: DatabaseTable,
 {
+    fn create_table(transaction: &WriteTransaction) -> Result<(), DatabaseError<T>> {
+        transaction
+            .0
+            .open_table(T::definition())
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     fn read_get(
         key: T::Key,
         transaction: &ReadTransaction,
