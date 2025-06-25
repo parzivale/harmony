@@ -1,6 +1,6 @@
 use blake3::{Hash, Hasher};
 use ed25519_dalek::Signature;
-use harmony_core::{Broker, ProtocolPacket};
+use harmony_core::ProtocolPacket;
 use iroh::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, time::SystemTime};

@@ -222,14 +222,23 @@ where
     }
 }
 
+impl<T> Default for TableManager<T>
+where
+    T: ProtocolServiceDefinition,
+{
+    fn default() -> Self {
+        TableManager {
+            _inner: PhantomData,
+        }
+    }
+}
+
 impl<T> TableManager<T>
 where
     T: ProtocolServiceDefinition,
 {
     pub fn new() -> Self {
-        TableManager {
-            _inner: PhantomData,
-        }
+        Self::default()
     }
 }
 

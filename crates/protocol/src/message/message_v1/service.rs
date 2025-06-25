@@ -99,17 +99,20 @@ impl DatabaseTable for LastMessageTable {
     }
 }
 
+type AnnotatedMessage = (NodeId, Vec<(Hash, Message)>, Hash);
+
 pub struct MessageService {
-    send: UnboundedSender<(NodeId, Vec<(Hash, Message)>, Hash)>,
-    send_handle: JoinHandle<()>,
+    send_annotated_message: UnboundedSender<AnnotatedMessage>,
+    _send_handle: JoinHandle<()>,
     previous_map: Mutex<BTreeMap<NodeId, Option<Hash>>>,
 }
 
 impl MessageService {
     pub fn new<Services: Send + 'static>(broker: &Broker<Services>) -> MessageService {
-        let (send, mut recv) = unbounded_channel::<(NodeId, Vec<(Hash, Message)>, Hash)>();
+        let (send_annotated_message, mut recv) =
+            unbounded_channel::<(NodeId, Vec<(Hash, Message)>, Hash)>();
         let cloned_broker = broker.clone();
-        let send_handle = tokio::task::spawn(async move {
+        let _send_handle = tokio::task::spawn(async move {
             while let Some((node, mut messages, prev)) = recv.recv().await {
                 Self::write_transaction(
                     &cloned_broker,
@@ -125,12 +128,15 @@ impl MessageService {
                         }
                         Ok(tx.finish(()))
                     },
-                );
+                ).await.unwrap();
             }
         });
+
+        let _recieve_handle = tokio::task::spawn(async move {});
+
         Self {
-            send,
-            send_handle,
+            send_annotated_message,
+            _send_handle,
             previous_map: Mutex::new(BTreeMap::new()),
         }
     }
@@ -150,7 +156,10 @@ impl MessageService {
         )
         .await
         {
-            Ok(res) => Ok(res),
+            Ok(res) => {
+                println!("current hash: {:?}", res);
+                Ok(res)
+            }
             Err(TransactionFutureError::TableError(TableError::TableDoesNotExist(_))) => {
                 MessageService::write_transaction(broker, move |manager, tx|  -> Result<WriteTransactionResult<()>, TransactionFutureError>{
                     manager.with_table::<LastMessageTable>().create_table(&tx)?;
@@ -164,6 +173,7 @@ impl MessageService {
                     let hash = manager
                         .with_table::<LastMessageTable>()
                         .read_get(node, &tx)?;
+                println!("current hash: {:?}", hash);
                     Ok(tx.finish(hash))
                 }).await
             }
@@ -197,7 +207,7 @@ pub enum SendMessageError {
     #[error(transparent)]
     ReadTransactionFutureError(#[from] TransactionFutureError),
     #[error(transparent)]
-    SendError(#[from] SendError<(NodeId, Vec<(Hash, Message)>, Hash)>),
+    SendError(#[from] SendError<AnnotatedMessage>),
 }
 
 pub type MessageSinkFuture<T> =
@@ -258,6 +268,8 @@ impl Sink<String> for MessageSink {
         ready!(this.sink.poll_flush_unpin(cx)?);
         let mut map = match this.definition.previous_map.try_lock() {
             Ok(ok) => ok,
+            //this is ok as the err state us just that we
+            // failed to aquire the lock
             Err(_) => return std::task::Poll::Pending,
         };
 
@@ -275,7 +287,7 @@ impl Sink<String> for MessageSink {
                 this.unprocessed_messages.pop_front();
             }
             if let Some(prev) = current_prev {
-                this.definition.send.send((
+                this.definition.send_annotated_message.send((
                     this.node,
                     this.processed_messages.drain(..).collect(),
                     *prev,
@@ -322,9 +334,11 @@ impl ProtocolServiceSendDefinition for MessageService {
 }
 
 pub struct MessageStream<'a> {
-    broker: Broker,
-    definition: Arc<MessageService>,
+    _broker: Broker,
+    _definition: Arc<MessageService>,
     stream: RecieveConnection<'a, Message>,
+    message_buffer: Vec<(Hash, Message)>,
+    message_hasher: MessageHasher,
 }
 
 impl<'a> MessageStream<'a> {
@@ -334,17 +348,19 @@ impl<'a> MessageStream<'a> {
         stream: RecieveConnection<'a, Message>,
     ) -> Self {
         Self {
-            broker: broker.clone(),
-            definition: Arc::clone(&definition),
+            _broker: broker.clone(),
+            _definition: Arc::clone(&definition),
             stream,
+            message_buffer: Vec::new(),
+            message_hasher: MessageHasher::new(),
         }
     }
 }
 
 #[derive(Debug)]
 pub struct MessageWithNode {
-    message: Message,
-    from: NodeId,
+    _message: Message,
+    _from: NodeId,
 }
 
 #[derive(Debug, Error)]
@@ -366,12 +382,15 @@ impl<'a> Stream for MessageStream<'a> {
             _ => return std::task::Poll::Ready(None),
         };
 
-        let from = packet.from_node();
+        let _from = packet.from_node();
         let data = packet.data();
 
+        let hash = data.as_hash(&mut this.message_hasher).unwrap();
+        this.message_buffer.push((hash, data.clone()));
+
         std::task::Poll::Ready(Some(MessageWithNode {
-            message: data,
-            from,
+            _message: data,
+            _from,
         }))
     }
 }

@@ -4,12 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-serde = { version = "1.0.219", features = ["derive"] }
 harmony_core = { path = "../harmony_core" }
-blake3 = { version = "1.8.2", features = ["serde"] }
+
+serde.workspace = true
 postcard.workspace = true
-ed25519-dalek = "2.1.1"
+ed25519-dalek.workspace = true
 iroh.workspace = true
-redb = "2.6.0"
-thiserror = "2.0.12"
+redb.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+
+#needed for the message hashing protocol
+blake3 = { version = "1.8.2", features = ["serde"] }

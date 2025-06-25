@@ -1,7 +1,7 @@
 use std::{
     marker::PhantomData,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 use futures_util::{Sink, ready};
@@ -18,6 +18,7 @@ where
     buffer: Vec<u8>,
     written: usize,
     flushing: bool,
+    waker: Option<Waker>,
     _phantom: PhantomData<T>,
 }
 
@@ -31,6 +32,7 @@ where
             buffer: Vec::new(),
             written: 0,
             flushing: false,
+            waker: None,
             _phantom: PhantomData,
         }
     }
@@ -54,8 +56,10 @@ where
 {
     type Error = PacketDispatcherError;
 
-    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.flushing {
+    fn poll_ready(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if this.flushing {
+            this.waker = Some(cx.waker().clone());
             Poll::Pending
         } else {
             Poll::Ready(Ok(()))
@@ -81,6 +85,9 @@ where
             this.written += n;
         }
         this.flushing = false;
+        if let Some(waker) = this.waker.take() {
+            waker.wake();
+        }
         this.buffer.clear();
         this.written = 0;
         Poll::Ready(Ok(()))

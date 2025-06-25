@@ -6,14 +6,14 @@ use harmony_core::{
 use iroh::{PublicKey, SecretKey};
 use protocol::message::v1::service::MessageService;
 
-const PEER_2_ADDR: &str = "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c";
+const PEER_1_ADDR: &str = "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394";
 
 #[tokio::main]
 async fn main() {
-    let key = SecretKey::from_bytes(&[2; 32]);
+    let key = SecretKey::from_bytes(&[1; 32]);
     println!("key is {:#?}", key.public());
 
-    let triple = OrgTriple::new("com", "harmony", "peer1");
+    let triple = OrgTriple::new("com", "harmony", "peer2");
     let builder = BrokerBuilder::new(key, triple).await.unwrap();
 
     let broker = builder
@@ -23,26 +23,23 @@ async fn main() {
         .await
         .unwrap();
 
-    let peer = PublicKey::from_str(PEER_2_ADDR).unwrap();
+    let peer = PublicKey::from_str(PEER_1_ADDR).unwrap();
     let message_service = MessageService::new(&broker);
     let (service, _) = ProtocolService::new(broker, message_service);
 
     let (send_service, recv_service) = service.service_channels();
-
     tokio::spawn(async move {
         let mut send_sink = send_service.send_sink(peer).await.unwrap();
-        while let Ok(()) = send_sink.send("HAII FROM PEER_1".into()).await {
-            tokio::time::sleep(Duration::from_secs(1)).await
-        }
 
+        while let Ok(()) = send_sink.send("HAIIII FROM PEER_2".into()).await {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         send_sink.close().await.unwrap();
     });
 
     tokio::spawn(async move {
         let mut recv = recv_service.receieve_stream().unwrap();
-        println!("setup recv");
         while let Some(packet) = recv.next().await {
-            println!("entered body");
             println!("{:?}", packet);
         }
     })
